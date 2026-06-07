@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { supabase, rupee, dateFmt } from '../lib/supabase'
-import DateRangeFilter from '../components/ui/DateRangeFilter'
 import { Modal, Loader, Empty, SearchBox } from '../components/ui'
 import { Clock, LogIn, LogOut, Plus, Edit2, Users, Briefcase, DollarSign, AlertCircle, BarChart2 } from 'lucide-react'
 
@@ -40,7 +39,7 @@ export default function ResourcePage() {
   const [showRateModal, setShowRateModal] = useState(false)
   const [rateForm, setRateForm] = useState({ employee_id: '', monthly_salary: '', hourly_rate: '' })
   const [search, setSearch] = useState('')
-  const [dateRange, setDateRange] = useState(()=>{ const d=new Date(),y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'); return { from:`${y}-${m}-01`, to:new Date(y,d.getMonth()+1,0).toISOString().split('T')[0] } })
+  const [filterMonth, setFilterMonth] = useState(MONTH)
   const [submitting, setSub] = useState(false)
   const [err, setErr] = useState('')
 
@@ -49,8 +48,8 @@ export default function ResourcePage() {
   async function loadAll() {
     setLoading(true)
     const now = new Date()
-    const monthStart = dateRange.from
-    const monthEnd   = dateRange.to
+    const monthStart = `${now.getFullYear()}-${String(filterMonth).padStart(2,'0')}-01`
+    const monthEnd = new Date(now.getFullYear(), filterMonth, 0).toISOString().split('T')[0]
 
     const queries = [
       supabase.from('time_logs').select('*, project:projects(name,code), employee:profiles!employee_id(full_name, role)').eq('employee_id', profile.id).order('check_in', { ascending: false }),
@@ -347,7 +346,9 @@ export default function ResourcePage() {
         <div>
           <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
             <SearchBox value={search} onChange={setSearch} placeholder="Search employee or project…" />
-            <DateRangeFilter from={dateRange.from} to={dateRange.to} onChange={setDateRange} label="Pick date range"/>
+            <select className="form-select" value={filterMonth} onChange={e => { setFilterMonth(parseInt(e.target.value)); loadAll() }} style={{ width: 140 }}>
+              {MONTHS.map((m, i) => <option key={i+1} value={i+1}>{m} {YEAR}</option>)}
+            </select>
             <span style={{ marginLeft: 'auto', fontSize: 12, color: '#64748b' }}>{filteredLogs.length} logs</span>
           </div>
           <div className="table-wrap">
