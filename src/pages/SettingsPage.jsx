@@ -122,41 +122,102 @@ function TabVisibilityTab() {
 }
 
 // ── Approval Chain Config ──
-function ApprovalChainTab() {
-  const [saved, setSaved] = useState(false)
-  function save() { setSaved(true); setTimeout(() => setSaved(false), 2500) }
+const DEFAULT_CHAINS = {
+  employee:  ['Manager','CEO','Finance'],
+  manager:   ['CEO','Finance'],
+  finance:   ['Manager','CEO'],
+  hr:        ['Manager','CEO','Finance'],
+}
+const STEP_COLORS = { Manager:'#3b82f6', CEO:'#e11d48', Finance:'#10b981', HR:'#0891b2', 'Dept Head':'#8b5cf6' }
+const ALL_STEPS   = ['Manager','Dept Head','CEO','Finance','HR']
 
-  const rules = [
-    { label: '≤ ₹25,000', chain: ['Manager'] },
-    { label: '₹25,001 – ₹1,00,000', chain: ['Manager', 'CEO'] },
-    { label: '> ₹1,00,000', chain: ['Manager', 'CEO', 'Finance'] },
-  ]
-  const roleColors = { Manager: { bg: '#dbeafe', color: '#1d4ed8' }, CEO: { bg: '#fee2e2', color: '#dc2626' }, Finance: { bg: '#d1fae5', color: '#065f46' } }
+function ApprovalChainTab() {
+  const DEFAULT_CHAINS = {
+    employee: ['Manager','CEO','Finance'],
+    manager:  ['CEO','Finance'],
+    finance:  ['Manager','CEO'],
+    hr:       ['Manager','CEO'],
+  }
+  const STEPS = ['Manager','Dept Head','CEO','Finance','HR']
+  const STEP_CLR = { Manager:'#3b82f6', 'Dept Head':'#8b5cf6', CEO:'#e11d48', Finance:'#10b981', HR:'#0891b2' }
+
+  const [chains, setChains] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('nx_approval_chains') || 'null') || DEFAULT_CHAINS }
+    catch { return DEFAULT_CHAINS }
+  })
+  const [saved, setSaved] = useState(false)
+
+  function toggle(role, step) {
+    setChains(prev => {
+      const cur  = prev[role] || []
+      const next = cur.includes(step) ? cur.filter(s=>s!==step) : [...cur, step]
+      return { ...prev, [role]: next }
+    })
+  }
+
+  function save() {
+    localStorage.setItem('nx_approval_chains', JSON.stringify(chains))
+    setSaved(true); setTimeout(() => setSaved(false), 2500)
+  }
+
+  function reset() { setChains(DEFAULT_CHAINS) }
 
   return (
     <div>
-      <h3 style={{ fontWeight: 800, fontSize: '1.05rem', marginBottom: 6 }}>Approval Chain by Amount</h3>
-      <p style={{ color: 'var(--ink-muted)', fontSize: '0.88rem', marginBottom: 20 }}>Approval hierarchy based on expense amount thresholds.</p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 24 }}>
-        {rules.map(rule => (
-          <div key={rule.label} style={{ display: 'flex', alignItems: 'center', gap: 20, padding: '14px 20px', borderRadius: 12, border: '1.5px solid var(--border)', background: 'var(--surface)' }}>
-            <div style={{ minWidth: 200, fontWeight: 700, fontSize: '0.9rem' }}>{rule.label}</div>
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-              {rule.chain.map((step, i) => (
-                <span key={step} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  {i > 0 && <span style={{ color: 'var(--ink-muted)', fontSize: 18 }}>→</span>}
-                  <span style={{ padding: '4px 12px', borderRadius: 999, fontWeight: 700, fontSize: '0.78rem', background: roleColors[step]?.bg, color: roleColors[step]?.color }}>{step.toUpperCase()}</span>
-                </span>
-              ))}
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:18 }}>
+        <div>
+          <div style={{ fontWeight:800, fontSize:15, marginBottom:4 }}>Approval Chain by Submitter Role</div>
+          <div style={{ fontSize:12, color:'var(--text-muted)' }}>Toggle which approvers are required for each role. Changes are saved per browser — update <code style={{ background:'var(--bg-3)', padding:'1px 5px', borderRadius:3, fontSize:11 }}>src/lib/approvalFlow.js</code> for team-wide changes.</div>
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={reset} style={{ flexShrink:0 }}>↺ Reset Defaults</button>
+      </div>
+
+      <div style={{ display:'flex', flexDirection:'column', gap:14, marginBottom:20 }}>
+        {Object.entries(chains).map(([role, steps]) => (
+          <div key={role} style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:12, padding:'16px 20px' }}>
+            {/* Role label + chain preview */}
+            <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:12, flexWrap:'wrap' }}>
+              <span style={{ padding:'3px 12px', borderRadius:4, fontSize:11, fontWeight:700, background:'var(--c1-soft)', color:'var(--c1)', textTransform:'capitalize', minWidth:80, textAlign:'center' }}>
+                {role.replace('_',' ')}
+              </span>
+              <span style={{ fontSize:11, color:'var(--text-muted)' }}>submits →</span>
+              <div style={{ display:'flex', alignItems:'center', gap:5, flexWrap:'wrap' }}>
+                {steps.length === 0
+                  ? <span style={{ fontSize:11, color:'var(--amber)', fontStyle:'italic' }}>Direct approval</span>
+                  : steps.map((s, i) => (
+                    <span key={s} style={{ display:'flex', alignItems:'center', gap:5 }}>
+                      {i > 0 && <span style={{ color:'var(--text-muted)', fontSize:14 }}>→</span>}
+                      <span style={{ padding:'2px 10px', borderRadius:4, fontSize:11, fontWeight:700, background:`${STEP_CLR[s]||'#6366f1'}15`, color:STEP_CLR[s]||'#6366f1' }}>{s}</span>
+                    </span>
+                  ))
+                }
+                <span style={{ color:'var(--text-muted)', fontSize:14 }}>→</span>
+                <span style={{ padding:'2px 10px', borderRadius:4, fontSize:11, fontWeight:700, background:'#dcfce7', color:'#15803d' }}>✓ Approved</span>
+              </div>
+            </div>
+
+            {/* Toggle buttons */}
+            <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+              {STEPS.map(step => {
+                const on  = steps.includes(step)
+                const clr = STEP_CLR[step] || '#6366f1'
+                return (
+                  <button key={step} onClick={() => toggle(role, step)}
+                    style={{ padding:'6px 14px', borderRadius:6, cursor:'pointer', fontSize:11, fontWeight:700, fontFamily:'inherit', transition:'all .15s',
+                      border: `1.5px solid ${on ? clr : 'var(--border)'}`,
+                      background: on ? `${clr}12` : 'var(--surface-2)',
+                      color: on ? clr : 'var(--text-muted)' }}>
+                    {on ? '✓' : '+'} {step}
+                  </button>
+                )
+              })}
             </div>
           </div>
         ))}
       </div>
-      <div style={{ padding: '12px 16px', borderRadius: 10, background: '#fef3c7', border: '1px solid #fde68a', marginBottom: 20, fontSize: '0.85rem', color: '#92400e' }}>
-        <strong>Note:</strong> Modify thresholds directly in your Supabase backend or RPC functions.
-      </div>
-      {saved && <Alert type="success" message="Settings saved!" />}
-      <button className="btn btn-primary" onClick={save}><Save size={15} /> Save Settings</button>
+
+      {saved && <div className="alert alert-success" style={{ marginBottom:14 }}>✓ Approval chains saved to this browser!</div>}
+      <button className="btn btn-primary" onClick={save}><Save size={14}/> Save Approval Chains</button>
     </div>
   )
 }

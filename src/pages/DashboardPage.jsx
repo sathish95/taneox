@@ -87,6 +87,147 @@ const HERO = {
   employee: { bg:'linear-gradient(135deg,#78350f 0%,#d97706 50%,#fbbf24 100%)', emoji:'👤', title:'My Workspace' },
 }
 
+
+/* ── Dashboard Check-In Widget ────────────────────────────── */
+function CheckInWidget() {
+  const { profile } = useAuth()
+  const [activeLog,   setActiveLog]   = useState(null)
+  const [projects,    setProjects]    = useState([])
+  const [selProject,  setSelProject]  = useState('')
+  const [comment,     setComment]     = useState('')
+  const [elapsed,     setElapsed]     = useState('')
+  const [checking,    setChecking]    = useState(false)
+  const [loading,     setLoading]     = useState(true)
+  const [expanded,    setExpanded]    = useState(false)
+
+  useEffect(() => {
+    loadActive()
+    supabase.from('projects').select('id,name,code').eq('status','active').order('name')
+      .then(({data}) => setProjects(data||[]))
+  }, [profile?.id])
+
+  useEffect(() => {
+    if (!activeLog) { setElapsed(''); return }
+    function tick() {
+      const diff = Date.now() - new Date(activeLog.check_in).getTime()
+      const h = Math.floor(diff/3600000)
+      const m = Math.floor((diff%3600000)/60000)
+      const s = Math.floor((diff%60000)/1000)
+      setElapsed(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`)
+    }
+    tick()
+    const t = setInterval(tick, 1000)
+    return () => clearInterval(t)
+  }, [activeLog])
+
+  async function loadActive() {
+    if (!profile?.id) return
+    const { data } = await supabase.from('time_logs')
+      .select('id,check_in,project:projects(id,name)')
+      .eq('employee_id', profile.id)
+      .is('check_out', null)
+      .limit(1).maybeSingle()
+    setActiveLog(data); setLoading(false)
+  }
+
+  async function checkIn() {
+    setChecking(true)
+    const { error } = await supabase.from('time_logs').insert({
+      employee_id: profile.id,
+      project_id:  selProject || null,
+      check_in:    new Date().toISOString(),
+      work_date:   new Date().toISOString().split('T')[0],
+      comment:     comment || null,
+    })
+    if (error) { alert(error.message); setChecking(false); return }
+    await loadActive(); setExpanded(false); setComment(''); setChecking(false)
+  }
+
+  async function checkOut() {
+    if (!activeLog) return
+    setChecking(true)
+    const now = new Date()
+    const hrs = Math.round((now - new Date(activeLog.check_in))/3600000*100)/100
+    await supabase.from('time_logs').update({
+      check_out: now.toISOString(), hours_worked: hrs
+    }).eq('id', activeLog.id)
+    setActiveLog(null); setElapsed(''); setExpanded(false); setChecking(false)
+  }
+
+  if (loading) return null
+
+  const isIn = !!activeLog
+
+  return (
+    <div style={{ position:'relative' }}>
+      {/* Trigger button */}
+      <button onClick={() => setExpanded(!expanded)}
+        style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 14px', borderRadius:20, border:`1.5px solid ${isIn?'var(--emerald)':'var(--border)'}`, background:isIn?'rgba(5,150,105,.08)':'var(--surface)', cursor:'pointer', fontFamily:'inherit', color:isIn?'var(--emerald)':'var(--text-soft)', fontWeight:700, fontSize:12, transition:'all .2s' }}>
+        <div style={{ width:8, height:8, borderRadius:'50%', background:isIn?'var(--emerald)':'var(--text-muted)', flexShrink:0, animation:isIn?'pulse-dot 2s ease infinite':'none' }}/>
+        {isIn ? (
+          <span style={{ fontFamily:'var(--font-mono)', fontWeight:800, fontSize:13, color:'var(--emerald)' }}>{elapsed}</span>
+        ) : (
+          <span>Check In</span>
+        )}
+        {isIn && activeLog?.project?.name && (
+          <span style={{ fontSize:10, color:'var(--emerald)', opacity:.8 }}>· {activeLog.project.name}</span>
+        )}
+        <span style={{ fontSize:10, color:'var(--text-muted)', marginLeft:2 }}>{expanded?'▲':'▼'}</span>
+      </button>
+
+      {/* Dropdown panel */}
+      {expanded && (
+        <div style={{ position:'absolute', top:'calc(100% + 8px)', right:0, width:300, background:'var(--surface)', border:'1px solid var(--border)', borderRadius:12, boxShadow:'var(--shadow-lg)', zIndex:200, padding:16, overflow:'hidden' }}>
+          {isIn ? (
+            /* CHECKED IN — show status + checkout */
+            <div>
+              <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
+                <div style={{ width:10, height:10, borderRadius:'50%', background:'var(--emerald)', animation:'pulse-dot 2s ease infinite' }}/>
+                <span style={{ fontWeight:700, fontSize:13, color:'var(--emerald)' }}>Currently checked in</span>
+              </div>
+              <div style={{ padding:'10px 12px', borderRadius:8, background:'var(--surface-2)', marginBottom:12 }}>
+                <div style={{ fontSize:11, color:'var(--text-muted)', marginBottom:2 }}>Project</div>
+                <div style={{ fontWeight:700 }}>{activeLog?.project?.name || 'No project selected'}</div>
+                <div style={{ fontFamily:'var(--font-mono)', fontWeight:800, fontSize:22, color:'var(--emerald)', marginTop:6 }}>{elapsed}</div>
+                <div style={{ fontSize:10, color:'var(--text-muted)', marginTop:2 }}>Since {new Date(activeLog.check_in).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}</div>
+              </div>
+              <button className="btn btn-danger" style={{ width:'100%', justifyContent:'center', letterSpacing:'.03em' }} onClick={checkOut} disabled={checking}>
+                {checking ? '⏳ Checking out…' : '🚪 Check Out Now'}
+              </button>
+            </div>
+          ) : (
+            /* NOT CHECKED IN — show check-in form */
+            <div>
+              <div style={{ fontWeight:700, fontSize:13, marginBottom:12, display:'flex', alignItems:'center', gap:6 }}>
+                <span style={{ width:8, height:8, borderRadius:'50%', background:'var(--text-muted)', display:'inline-block' }}/>
+                Not checked in
+              </div>
+              <div className="form-group">
+                <label className="form-label">Project (optional)</label>
+                <select className="form-select" value={selProject} onChange={e=>setSelProject(e.target.value)} style={{ fontSize:12 }}>
+                  <option value="">No specific project</option>
+                  {projects.map(p=><option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">What will you work on?</label>
+                <input className="form-input" value={comment} onChange={e=>setComment(e.target.value)} placeholder="Brief description…" style={{ fontSize:12 }}
+                  onKeyDown={e=>e.key==='Enter'&&checkIn()}/>
+              </div>
+              <button className="btn btn-success" style={{ width:'100%', justifyContent:'center' }} onClick={checkIn} disabled={checking}>
+                {checking ? '⏳ Checking in…' : '✅ Check In Now'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Backdrop to close */}
+      {expanded && <div onClick={()=>setExpanded(false)} style={{ position:'fixed', inset:0, zIndex:199 }}/>}
+    </div>
+  )
+}
+
 export default function DashboardPage() {
   const { profile } = useAuth()
   const role     = profile?.role || 'employee'
@@ -244,6 +385,10 @@ export default function DashboardPage() {
   // ─── HR DASHBOARD ─────────────────────────────────────────────
   if (role==='hr') return (
     <div style={{ display:'flex', flexDirection:'column', gap:20 }}>
+      {/* Top right check-in — rendered inline below hero */}
+      <div style={{ display:'flex', justifyContent:'flex-end', marginBottom:8 }}>
+        <CheckInWidget/>
+      </div>
       <HeroBanner hero={hero} name={profile?.full_name} greeting={greeting} today={today}/>
       <SectionHeader title="👥 People & HR Overview"/>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:12 }}>
@@ -284,6 +429,10 @@ export default function DashboardPage() {
   // ─── MANAGER DASHBOARD ────────────────────────────────────────
   if (role==='manager') return (
     <div style={{ display:'flex', flexDirection:'column', gap:20 }}>
+      {/* Top right check-in — rendered inline below hero */}
+      <div style={{ display:'flex', justifyContent:'flex-end', marginBottom:8 }}>
+        <CheckInWidget/>
+      </div>
       <HeroBanner hero={hero} name={profile?.full_name} greeting={greeting} today={today}/>
       <SectionHeader title="📋 Operations Overview" action={<PeriodFilter value={period} onChange={setPeriod}/>}/>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(155px,1fr))', gap:12 }}>
@@ -347,6 +496,10 @@ export default function DashboardPage() {
   // ─── FINANCE DASHBOARD ────────────────────────────────────────
   if (role==='finance') return (
     <div style={{ display:'flex', flexDirection:'column', gap:20 }}>
+      {/* Top right check-in — rendered inline below hero */}
+      <div style={{ display:'flex', justifyContent:'flex-end', marginBottom:8 }}>
+        <CheckInWidget/>
+      </div>
       <HeroBanner hero={hero} name={profile?.full_name} greeting={greeting} today={today}/>
       <SectionHeader title="💰 Financial Overview" action={<PeriodFilter value={period} onChange={setPeriod}/>}/>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(155px,1fr))', gap:12 }}>
@@ -422,6 +575,10 @@ export default function DashboardPage() {
   // ─── CEO / ADMIN DASHBOARD ────────────────────────────────────
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:24 }}>
+      {/* Top right check-in — rendered inline below hero */}
+      <div style={{ display:'flex', justifyContent:'flex-end', marginBottom:8 }}>
+        <CheckInWidget/>
+      </div>
       <HeroBanner hero={hero} name={profile?.full_name} greeting={greeting} today={today}/>
 
       {/* Employee KPIs */}
