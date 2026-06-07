@@ -1,7 +1,8 @@
 import { createClient } from '@supabase/supabase-js'
 
- const URL  = import.meta.env.VITE_SUPABASE_URL || 'https://zjyriyogntcyevlpitpe.supabase.co'
-const KEY  = import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_QHhTDrxnkPBklO8uGD9D4A_HWHkVWYk'
+const URL  = import.meta.env.VITE_SUPABASE_URL || ''
+const KEY  = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+
 // Show a clear setup screen if env vars are missing (never crash)
 export const MISSING_ENV = !URL || !KEY
 
