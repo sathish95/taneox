@@ -53,103 +53,6 @@ const ALL_NAV = [
   ]},
 ]
 
-
-function TopbarCheckIn({ profile }) {
-  const [activeLog, setActiveLog] = useState(null)
-  const [projects,  setProjects]  = useState([])
-  const [selProj,   setSelProj]   = useState('')
-  const [task,      setTask]      = useState('')
-  const [elapsed,   setElapsed]   = useState('')
-  const [open,      setOpen]      = useState(false)
-  const [busy,      setBusy]      = useState(false)
-
-  useEffect(() => { loadActive(); supabase.from('projects').select('id,name,code').eq('status','active').order('name').then(({data})=>setProjects(data||[])) }, [profile?.id])
-  useEffect(() => {
-    if (!activeLog) { setElapsed(''); return }
-    function tick(){const d=Date.now()-new Date(activeLog.check_in).getTime();const h=Math.floor(d/3600000);const m=Math.floor((d%3600000)/60000);const s=Math.floor((d%60000)/1000);setElapsed(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`)}
-    tick(); const t=setInterval(tick,1000); return()=>clearInterval(t)
-  }, [activeLog])
-
-  async function loadActive() {
-    if (!profile?.id) return
-    const {data} = await supabase.from('time_logs').select('id,check_in,project:projects(id,name)').eq('employee_id',profile.id).is('check_out',null).limit(1).maybeSingle()
-    setActiveLog(data)
-  }
-  async function doCheckIn() {
-    setBusy(true)
-    await supabase.from('time_logs').insert({ employee_id:profile.id, project_id:selProj||null, check_in:new Date().toISOString(), work_date:new Date().toISOString().split('T')[0], comment:task||null })
-    await loadActive(); setOpen(false); setTask(''); setBusy(false)
-  }
-  async function doCheckOut() {
-    if (!activeLog) return; setBusy(true)
-    const now=new Date(); const hrs=Math.round((now-new Date(activeLog.check_in))/3600000*100)/100
-    await supabase.from('time_logs').update({ check_out:now.toISOString(), hours_worked:hrs }).eq('id',activeLog.id)
-    setActiveLog(null); setElapsed(''); setOpen(false); setBusy(false)
-  }
-
-  const isIn = !!activeLog
-
-  return (
-    <div style={{ position:'relative' }}>
-      <button onClick={()=>setOpen(o=>!o)}
-        style={{ display:'flex', alignItems:'center', gap:7, padding:'6px 14px', borderRadius:20,
-          border:`1.5px solid ${isIn?'var(--emerald)':'var(--border)'}`,
-          background:isIn?'rgba(5,150,105,.08)':'var(--surface-2)',
-          color:isIn?'var(--emerald)':'var(--text-soft)',
-          cursor:'pointer', fontFamily:'inherit', fontWeight:700, fontSize:12, transition:'all .2s' }}>
-        <div style={{ width:8, height:8, borderRadius:'50%', background:isIn?'var(--emerald)':'var(--text-muted)', animation:isIn?'pulse-dot 2s ease infinite':'none' }}/>
-        {isIn
-          ? <span style={{ fontFamily:'var(--font-mono)', fontWeight:800, fontSize:13, letterSpacing:'.02em' }}>{elapsed}</span>
-          : <span>Check In</span>
-        }
-        <span style={{ fontSize:9, opacity:.6 }}>{open?'▲':'▼'}</span>
-      </button>
-
-      {open && (
-        <>
-          <div onClick={()=>setOpen(false)} style={{ position:'fixed', inset:0, zIndex:199 }}/>
-          <div style={{ position:'absolute', top:'calc(100% + 8px)', right:0, width:290, background:'var(--surface)', border:'1px solid var(--border)', borderRadius:12, boxShadow:'var(--shadow-lg)', zIndex:200, padding:16 }}>
-            {isIn ? (
-              <div>
-                <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
-                  <div style={{ width:9, height:9, borderRadius:'50%', background:'var(--emerald)', animation:'pulse-dot 2s ease infinite' }}/>
-                  <span style={{ fontWeight:700, fontSize:13, color:'var(--emerald)' }}>Active Session</span>
-                </div>
-                <div style={{ padding:'10px 12px', borderRadius:8, background:'var(--surface-2)', marginBottom:12 }}>
-                  <div style={{ fontSize:10, color:'var(--text-muted)' }}>{activeLog?.project?.name || 'No project'}</div>
-                  <div style={{ fontFamily:'var(--font-mono)', fontWeight:900, fontSize:26, color:'var(--emerald)', lineHeight:1.1, marginTop:4 }}>{elapsed}</div>
-                  <div style={{ fontSize:10, color:'var(--text-muted)', marginTop:3 }}>Since {new Date(activeLog.check_in).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}</div>
-                </div>
-                <button className="btn btn-danger" style={{ width:'100%', justifyContent:'center' }} onClick={doCheckOut} disabled={busy}>
-                  {busy?'⏳ Checking out…':'🚪 Check Out'}
-                </button>
-              </div>
-            ) : (
-              <div>
-                <div style={{ fontWeight:700, fontSize:13, marginBottom:12 }}>📍 Check In</div>
-                <div style={{ marginBottom:10 }}>
-                  <div style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'.05em', color:'var(--text-muted)', marginBottom:5 }}>Project</div>
-                  <select className="form-select" value={selProj} onChange={e=>setSelProj(e.target.value)} style={{ fontSize:12 }}>
-                    <option value="">No specific project</option>
-                    {projects.map(p=><option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
-                  </select>
-                </div>
-                <div style={{ marginBottom:12 }}>
-                  <div style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'.05em', color:'var(--text-muted)', marginBottom:5 }}>What are you working on?</div>
-                  <input className="form-input" value={task} onChange={e=>setTask(e.target.value)} placeholder="Brief task description…" style={{ fontSize:12 }} onKeyDown={e=>e.key==='Enter'&&doCheckIn()}/>
-                </div>
-                <button className="btn btn-success" style={{ width:'100%', justifyContent:'center' }} onClick={doCheckIn} disabled={busy}>
-                  {busy?'⏳ Checking in…':'✅ Check In'}
-                </button>
-              </div>
-            )}
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
 export default function Layout({ children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
@@ -263,7 +166,6 @@ export default function Layout({ children }) {
           </button>
           <div className="topbar-title">{pageTitle}</div>
           <div className="topbar-right">
-            <TopbarCheckIn/>
             <div className="topbar-avatar" style={{ background: color }}>{initials}</div>
           </div>
         </header>

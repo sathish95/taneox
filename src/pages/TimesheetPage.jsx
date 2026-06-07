@@ -25,8 +25,7 @@ export default function TimesheetPage() {
 
   // Add entry form
   const [form, setForm] = useState({
-    user_id: profile?.id || '', start_date: today(), end_date: today(),
-    start_time: '09:00', end_time: '18:00', project_id: '', comment: ''
+    user_id: profile?.id || '', date: today(), project_id: '', hours: '', comment: ''
   })
 
   useEffect(() => { loadAll() }, [selUser, selMonth, selYear])
@@ -63,37 +62,17 @@ export default function TimesheetPage() {
     e.preventDefault(); setSub(true)
     try {
       const uid = isMgr ? form.user_id : profile?.id
-      if (!uid)             { alert('Please select an employee'); setSub(false); return }
-      if (!form.start_date) { alert('Start date is required'); setSub(false); return }
-      if (!form.end_date)   { alert('End date is required'); setSub(false); return }
-      if (!form.start_time) { alert('Start time is required'); setSub(false); return }
-      if (!form.end_time)   { alert('End time is required'); setSub(false); return }
-      const [sh,sm] = form.start_time.split(':').map(Number)
-      const [eh,em] = form.end_time.split(':').map(Number)
-      const hrsPerDay = Math.round(((eh*60+em)-(sh*60+sm))/60*100)/100
-      if (hrsPerDay <= 0) { alert('End time must be after start time'); setSub(false); return }
-      const startD = new Date(form.start_date)
-      const endD   = new Date(form.end_date)
-      if (endD < startD) { alert('End date must be on or after start date'); setSub(false); return }
-      // Build one row per working day
-      const rows = []
-      const cur  = new Date(startD)
-      while (cur <= endD) {
-        const day = cur.getDay()
-        if (day !== 0 && day !== 6) {
-          const ds = cur.toISOString().split('T')[0]
-          rows.push({ employee_id:uid, project_id:form.project_id||null, work_date:ds,
-            check_in:`${ds}T${form.start_time}:00`, check_out:`${ds}T${form.end_time}:00`,
-            hours_worked:hrsPerDay, comment:form.comment||null })
-        }
-        cur.setDate(cur.getDate()+1)
-      }
-      if (rows.length === 0) { alert('No working days in range (weekends excluded)'); setSub(false); return }
-      const { error } = await supabase.from('time_logs').insert(rows)
+      const { error } = await supabase.from('time_logs').insert({
+        employee_id:  uid,
+        project_id:   form.project_id || null,
+        work_date:    form.date,
+        check_in:     `${form.date}T09:00:00`,
+        check_out:    form.hours ? `${form.date}T${String(9+Math.floor(parseFloat(form.hours))).padStart(2,'0')}:${String(Math.round((parseFloat(form.hours)%1)*60)).padStart(2,'0')}:00` : null,
+        hours_worked: parseFloat(form.hours) || null,
+        comment:      form.comment || null,
+      })
       if (error) throw error
-      setShowAdd(false)
-      setForm({ user_id:profile?.id||'', start_date:today(), end_date:today(), start_time:'09:00', end_time:'18:00', project_id:'', comment:'' })
-      loadAll()
+      setShowAdd(false); setForm({ user_id:profile?.id||'', date:today(), project_id:'', hours:'', comment:'' }); loadAll()
     } catch(e) { alert(e.message) }
     finally { setSub(false) }
   }
@@ -272,26 +251,12 @@ export default function TimesheetPage() {
         )}
         <div className="form-row">
           <div className="form-group">
-            <label className="form-label">Start Date *</label>
-            <input className="form-input" type="date" value={form.start_date||today()}
-              onChange={e=>setForm(f=>({...f,start_date:e.target.value,end_date:f.end_date<e.target.value?e.target.value:f.end_date}))} required/>
+            <label className="form-label">Date *</label>
+            <input className="form-input" type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))} required/>
           </div>
           <div className="form-group">
-            <label className="form-label">End Date *</label>
-            <input className="form-input" type="date" value={form.end_date||today()}
-              min={form.start_date} onChange={e=>setForm(f=>({...f,end_date:e.target.value}))} required/>
-          </div>
-        </div>
-        <div className="form-row">
-          <div className="form-group">
-            <label className="form-label">Start Time *</label>
-            <input className="form-input" type="time" value={form.start_time||'09:00'}
-              onChange={e=>setForm(f=>({...f,start_time:e.target.value}))} required/>
-          </div>
-          <div className="form-group">
-            <label className="form-label">End Time *</label>
-            <input className="form-input" type="time" value={form.end_time||'18:00'}
-              onChange={e=>setForm(f=>({...f,end_time:e.target.value}))} required/>
+            <label className="form-label">Hours Worked *</label>
+            <input className="form-input" type="number" step="0.5" min="0.5" max="16" value={form.hours} onChange={e=>setForm(f=>({...f,hours:e.target.value}))} placeholder="e.g. 8" required/>
           </div>
         </div>
         <div className="form-group">
@@ -305,30 +270,14 @@ export default function TimesheetPage() {
           <label className="form-label">What did you work on?</label>
           <textarea className="form-textarea" value={form.comment} onChange={e=>setForm(f=>({...f,comment:e.target.value}))} placeholder="Brief description of work done…"/>
         </div>
-        {form.start_date && form.end_date && form.start_time && form.end_time && (() => {
-          const [sh,sm] = form.start_time.split(':').map(Number)
-          const [eh,em] = form.end_time.split(':').map(Number)
-          const hpd = Math.round(((eh*60+em)-(sh*60+sm))/60*100)/100
-          if (hpd <= 0) return <div style={{padding:'8px 12px',borderRadius:8,background:'#fee2e2',color:'#b91c1c',fontSize:12,fontWeight:600,marginBottom:8}}>⚠ End time must be after start time</div>
-          let days=0; const cur=new Date(form.start_date); const endD=new Date(form.end_date)
-          if (endD<cur) return <div style={{padding:'8px 12px',borderRadius:8,background:'#fee2e2',color:'#b91c1c',fontSize:12,fontWeight:600,marginBottom:8}}>⚠ End date must be on or after start date</div>
-          while(cur<=endD){if(cur.getDay()!==0&&cur.getDay()!==6)days++;cur.setDate(cur.getDate()+1)}
-          const total = Math.round(days*hpd*100)/100
-          const uid = isMgr ? form.user_id : profile?.id
-          const rate = uid ? getRate(uid) : null
-          const hrRate = rate ? (rate.hourly_rate||(rate.monthly_salary/(22*8))) : null
+        {form.user_id && form.hours && (() => {
+          const r = getRate(form.user_id||profile?.id)
+          if (!r) return null
+          const hrRate = r.hourly_rate||(r.monthly_salary/(22*8))
+          const pay = Math.round(parseFloat(form.hours)*hrRate)
           return (
-            <div style={{marginBottom:8}}>
-              <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8,marginBottom:8}}>
-                {[['⏱ Per Day',`${hpd}h`,'var(--c1)'],['📅 Working Days',days,'var(--violet)'],['Total Hours',`${total}h`,'var(--emerald)']].map(([l,v,c])=>(
-                  <div key={l} style={{padding:'10px 8px',borderRadius:8,background:'var(--surface-2)',border:'1px solid var(--border)',textAlign:'center'}}>
-                    <div style={{fontFamily:'var(--font-mono)',fontWeight:800,fontSize:18,color:c}}>{v}</div>
-                    <div style={{fontSize:10,color:'var(--text-muted)',marginTop:2}}>{l}</div>
-                  </div>
-                ))}
-              </div>
-              {days>1&&<div style={{fontSize:10,color:'var(--text-muted)',textAlign:'center',marginBottom:6}}>Creates {days} log entries (Mon–Fri only, weekends skipped)</div>}
-              {hrRate&&<div style={{padding:'8px 12px',borderRadius:8,background:'#f0fdf4',border:'1px solid #bbf7d0',fontSize:12,fontWeight:600,color:'#15803d'}}>💰 Est. pay: {rupee(Math.round(total*hrRate))} ({total}h @ ₹{hrRate.toFixed(0)}/hr)</div>}
+            <div style={{ padding:'10px 14px', borderRadius:10, background:'#f0fdf4', border:'1px solid #bbf7d0', fontSize:12, fontWeight:600, color:'#15803d' }}>
+              💰 Estimated pay for this entry: {rupee(pay)} (@ ₹{hrRate.toFixed(0)}/hr)
             </div>
           )
         })()}
