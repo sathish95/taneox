@@ -1,3 +1,4 @@
+export { default as DateRangeFilter } from './DateRangeFilter'
 import { X, Search, ChevronRight } from 'lucide-react'
 
 // ── Loader ──

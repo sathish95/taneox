@@ -4,8 +4,7 @@ import { supabase, rupee, dateFmt, nextNum } from '../lib/supabase'
 import { getChain, canActOn, buildApprovalUpdate, statusLabel } from '../lib/approvalFlow.js'
 import ApprovalChainViz from '../components/ui/ApprovalChainViz'
 import { Modal, StatusBadge, SearchBox, Loader, Empty, Confirm } from '../components/ui'
-import { Plus, Eye, Trash2, CheckCircle, XCircle, Upload, IndianRupee, FileSpreadsheet } from 'lucide-react'
-import ExcelImport from '../components/ui/ExcelImport'
+import { Plus, Eye, Trash2, CheckCircle, XCircle, Upload, IndianRupee } from 'lucide-react'
 
 const CATEGORIES = ['Travel','Food & Beverage','Accommodation','Office Supplies','Software',
   'Marketing','Training','Medical','Utilities','Miscellaneous']
@@ -22,7 +21,6 @@ export default function ExpensesPage() {
   const [search,     setSearch]     = useState('')
   const [statusFilter, setStatusF]  = useState('all')
   const [showCreate, setShowCreate] = useState(false)
-  const [showImportExp, setShowImportExp] = useState(false)
   const [showDetail, setShowDetail] = useState(null)
   const [showReview, setShowReview] = useState(null)
   const [deleteId,   setDeleteId]   = useState(null)
@@ -460,14 +458,6 @@ export default function ExpensesPage() {
       </Modal>
 
       <Confirm open={!!deleteId} message="Delete this expense request?" danger onConfirm={() => handleDelete(deleteId)} onCancel={() => setDeleteId(null)} />
-    {/* Excel Import Modal */}
-    <Modal open={showImportExp} onClose={()=>setShowImportExp(false)} title="" size="xl" footer={null}>
-      <ExcelImport
-        type="expenses"
-        onSuccess={()=>{ setTimeout(()=>loadExpenses?.(), 500) }}
-        onClose={()=>setShowImportExp(false)}
-      />
-    </Modal>
     </div>
   )
 }

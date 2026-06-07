@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { NavLink, useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import { useTabVisibility } from '../../context/TabVisibilityContext'
+import { supabase } from '../../lib/supabase'
 import {
   LayoutDashboard, Receipt, Users, FolderOpen, PieChart, Box, CheckSquare,
   FileText, TrendingUp, Settings, LogOut, Menu, X, ChevronLeft,
@@ -52,6 +53,148 @@ const ALL_NAV = [
     { to: '/content', tab: 'content', label: 'Landing Content', icon: Megaphone, roles: ['admin','ceo'] },
   ]},
 ]
+
+
+/* ══════════════════════════════════════════════════════════
+   TOP-RIGHT CHECK-IN WIDGET
+══════════════════════════════════════════════════════════ */
+function CheckInWidget({ profile }) {
+  const [open,       setOpen]      = useState(false)
+  const [activeLog,  setActiveLog] = useState(null)
+  const [projects,   setProjects]  = useState([])
+  const [projectId,  setProjectId] = useState('')
+  const [comment,    setComment]   = useState('')
+  const [elapsed,    setElapsed]   = useState('')
+  const [loading,    setLoading]   = useState(false)
+
+  useEffect(() => { if (profile?.id) fetchState() }, [profile?.id])
+
+  useEffect(() => {
+    if (!activeLog?.check_in) { setElapsed(''); return }
+    const tick = () => {
+      const diff = (Date.now() - new Date(activeLog.check_in)) / 1000
+      const h = Math.floor(diff / 3600), m = Math.floor((diff % 3600) / 60), s = Math.floor(diff % 60)
+      setElapsed(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`)
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [activeLog])
+
+  async function fetchState() {
+    const today = new Date().toISOString().split('T')[0]
+    const [logRes, projRes] = await Promise.all([
+      supabase.from('time_logs').select('*, project:projects(name)').eq('employee_id', profile.id)
+        .eq('work_date', today).is('check_out', null).order('check_in', { ascending:false }).limit(1),
+      supabase.from('projects').select('id,name').eq('status','active').order('name'),
+    ])
+    setActiveLog(logRes.data?.[0] || null)
+    setProjects(projRes.data || [])
+  }
+
+  async function handleCheckIn() {
+    setLoading(true)
+    const today = new Date().toISOString().split('T')[0]
+    const { error } = await supabase.from('time_logs').insert({
+      employee_id: profile.id,
+      project_id:  projectId || null,
+      work_date:   today,
+      check_in:    new Date().toISOString(),
+      comment:     comment || null,
+    })
+    if (error) { alert(error.message); setLoading(false); return }
+    setOpen(false); setComment(''); fetchState()
+    setLoading(false)
+  }
+
+  async function handleCheckOut() {
+    if (!activeLog) return
+    setLoading(true)
+    const now  = new Date()
+    const diff = (now - new Date(activeLog.check_in)) / 3600000
+    const hrs  = Math.round(diff * 100) / 100
+    const { error } = await supabase.from('time_logs').update({
+      check_out:    now.toISOString(),
+      hours_worked: hrs,
+    }).eq('id', activeLog.id)
+    if (error) { alert(error.message); setLoading(false); return }
+    setOpen(false); setActiveLog(null); fetchState()
+    setLoading(false)
+  }
+
+  const checkedIn = !!activeLog
+
+  return (
+    <div style={{ position:'relative' }}>
+      {/* Trigger button */}
+      <button onClick={() => setOpen(o => !o)}
+        style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 12px', borderRadius:8,
+          border:`1.5px solid ${checkedIn?'#10b981':'var(--border)'}`,
+          background:checkedIn?'#f0fdf4':'var(--surface)', cursor:'pointer', fontFamily:'inherit',
+          fontSize:12, fontWeight:700, color:checkedIn?'#15803d':'var(--text-soft)',
+          transition:'all .2s', whiteSpace:'nowrap' }}>
+        <span style={{ width:8, height:8, borderRadius:'50%', background:checkedIn?'#10b981':'var(--text-muted)',
+          flexShrink:0, animation:checkedIn?'pulse-dot 2s ease infinite':undefined }}/>
+        {checkedIn ? <>✓ Checked In {elapsed && <span style={{ fontFamily:'var(--font-mono)', fontSize:11, opacity:.8 }}>{elapsed}</span>}</> : 'Check In'}
+      </button>
+
+      {/* Dropdown panel */}
+      {open && (
+        <>
+          <div style={{ position:'fixed', inset:0, zIndex:299 }} onClick={() => setOpen(false)}/>
+          <div style={{ position:'absolute', top:'calc(100% + 8px)', right:0, zIndex:300, width:300,
+            background:'var(--surface)', border:'1px solid var(--border)', borderRadius:12,
+            boxShadow:'var(--shadow-lg)', padding:18 }}>
+
+            {checkedIn ? (
+              /* ── Checked In State ── */
+              <div>
+                <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
+                  <span style={{ width:10, height:10, borderRadius:'50%', background:'#10b981', animation:'pulse-dot 2s ease infinite' }}/>
+                  <span style={{ fontWeight:700, fontSize:13, color:'#15803d' }}>Checked In</span>
+                </div>
+                <div style={{ padding:'10px 12px', borderRadius:8, background:'var(--bg-3)', marginBottom:12 }}>
+                  <div style={{ fontSize:11, color:'var(--text-muted)', marginBottom:4 }}>Current Session</div>
+                  <div style={{ fontFamily:'var(--font-mono)', fontWeight:800, fontSize:22, color:'var(--c1)' }}>{elapsed}</div>
+                  {activeLog?.project?.name && <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:4 }}>📁 {activeLog.project.name}</div>}
+                  {activeLog?.comment && <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:2, fontStyle:'italic' }}>"{activeLog.comment}"</div>}
+                </div>
+                <button className="btn btn-danger" style={{ width:'100%', justifyContent:'center' }}
+                  onClick={handleCheckOut} disabled={loading}>
+                  {loading ? 'Saving…' : '⏹ Check Out & Save Hours'}
+                </button>
+              </div>
+            ) : (
+              /* ── Not Checked In ── */
+              <div>
+                <div style={{ fontWeight:700, fontSize:13, marginBottom:12 }}>Start your work session</div>
+                <div className="form-group">
+                  <label className="form-label">Project (optional)</label>
+                  <select className="form-select" value={projectId} onChange={e => setProjectId(e.target.value)}>
+                    <option value="">No project</option>
+                    {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">What are you working on?</label>
+                  <input className="form-input" value={comment} onChange={e => setComment(e.target.value)}
+                    placeholder="Brief task description…" onKeyDown={e => e.key==='Enter' && handleCheckIn()}/>
+                </div>
+                <button className="btn btn-success" style={{ width:'100%', justifyContent:'center' }}
+                  onClick={handleCheckIn} disabled={loading}>
+                  {loading ? 'Saving…' : '▶ Check In Now'}
+                </button>
+                <div style={{ fontSize:10, color:'var(--text-muted)', textAlign:'center', marginTop:8 }}>
+                  {new Date().toLocaleDateString('en-IN', { weekday:'long', day:'numeric', month:'short' })}
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
 
 export default function Layout({ children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -166,6 +309,7 @@ export default function Layout({ children }) {
           </button>
           <div className="topbar-title">{pageTitle}</div>
           <div className="topbar-right">
+            <CheckInWidget profile={profile} />
             <div className="topbar-avatar" style={{ background: color }}>{initials}</div>
           </div>
         </header>

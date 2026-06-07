@@ -1,602 +1,1013 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { supabase, rupee, dateFmt } from '../lib/supabase'
 import { Modal, Loader, Empty, Confirm, SearchBox } from '../components/ui'
-import {
-  Plus, Edit2, Trash2, FolderOpen, Eye, ArrowLeft,
-  Target, Users, DollarSign, Calendar, CheckCircle,
-  Clock, TrendingUp, Flag, ChevronRight
-} from 'lucide-react'
-import {
-  AreaChart, Area, BarChart, Bar, XAxis, YAxis,
-  CartesianGrid, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell
-} from 'recharts'
+import { Plus, Edit2, Trash2, FolderOpen, Eye, ArrowLeft, ChevronRight } from 'lucide-react'
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts'
+import DateRangeFilter from '../components/ui/DateRangeFilter'
 
-const STATUSES  = ['active','on_hold','completed','cancelled']
-const STATUS_C  = { active:'#10b981', on_hold:'#f59e0b', completed:'#6366f1', cancelled:'#ef4444' }
-const MS_STATUS = ['pending','in_progress','completed','delayed']
-const MS_COLORS = { pending:'#94a3b8', in_progress:'#f59e0b', completed:'#10b981', delayed:'#ef4444' }
-const MONTHS    = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-const PIE_CLR   = ['#6366f1','#10b981','#f59e0b','#ec4899','#3b82f6','#8b5cf6']
+/* ─── Constants ─────────────────────────────────────────── */
+const SC    = { active:'#10b981', on_hold:'#f59e0b', completed:'#3b82f6', cancelled:'#e11d48' }
+const MSC   = { pending:'#94a3b8', in_progress:'#d97706', completed:'#059669', delayed:'#e11d48' }
+const MOS   = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+const CCLR  = ['#3b82f6','#10b981','#f59e0b','#e11d48','#8b5cf6','#14b8a6','#f43f5e','#a855f7']
+const SW0   = ['server','third_party','saas','license','other']
+const HW0   = ['component','logistics','assembly','other']
+const SUP0  = ['device_logger','support_expense','maintenance','other']
 
-const initProj = () => ({ name:'', description:'', budget:'', start_date:'', end_date:'', status:'active' })
-const initMS   = () => ({ title:'', description:'', start_date:'', due_date:'', actual_start:'', actual_end:'', budget:'', status:'pending' })
+const iP = () => ({ name:'', description:'', budget:'', reserved_budget:'', start_date:'', end_date:'', status:'active' })
+const iMS= () => ({ title:'', description:'', start_date:'', due_date:'', actual_start:'', actual_end:'', budget:'', status:'pending' })
 
-export default function ProjectsPage() {
-  const { profile } = useAuth()
-  const role    = profile?.role || 'employee'
-  const canEdit = ['admin','ceo','manager','finance','department_head'].includes(role)
+/* ─── Tiny helpers ───────────────────────────────────────── */
+const Pill = ({s,map=SC}) => { const c=map[s]||'#94a3b8'; return <span style={{padding:'2px 9px',borderRadius:4,fontSize:10,fontWeight:700,textTransform:'capitalize',background:`${c}15`,color:c}}>{s?.replace('_',' ')}</span> }
+const TH=({c,s={}})=><th style={{padding:'8px 14px',textAlign:'left',fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--text-muted)',borderBottom:'1px solid var(--border)',whiteSpace:'nowrap',...s}}>{c}</th>
+const TD=({c,s={}})=><td style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',verticalAlign:'middle',...s}}>{c}</td>
+const MTD=({v,color='var(--text)'})=><td style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',fontFamily:'var(--font-mono)',fontWeight:700,color}}>{rupee(v||0)}</td>
+const SumCard=({label,value,color})=>(
+  <div style={{padding:'10px 14px',borderRadius:8,background:`${color}0d`,border:`1px solid ${color}25`,minWidth:120}}>
+    <div style={{fontSize:9,color:'var(--text-muted)',fontWeight:700,textTransform:'uppercase',letterSpacing:'.05em'}}>{label}</div>
+    <div style={{fontFamily:'var(--font-mono)',fontWeight:800,fontSize:16,color,marginTop:3}}>{value}</div>
+  </div>
+)
 
-  /* ─ list state ─ */
-  const [projects,  setProjects]  = useState([])
-  const [loading,   setLoading]   = useState(true)
-  const [search,    setSearch]    = useState('')
-  const [showModal, setShowModal] = useState(false)
-  const [editing,   setEditing]   = useState(null)
-  const [form,      setForm]      = useState(initProj())
-  const [delProj,   setDelProj]   = useState(null)
+/* ─── Central KPI Calculator ─────────────────────────────── */
+function computeKPIs(dd) {
+  if (!dd) return {}
+  const { sw=[], hw=[], sup=[], ra=[], rates=[], timelogs=[], expenses=[], milestones=[] } = dd
+  const swCo=sw.reduce((s,r)=>s+(r.cost_company||0),0), swCl=sw.reduce((s,r)=>s+(r.cost_client||0),0), swPr=sw.reduce((s,r)=>s+(r.proposal_cost||0),0)
+  const hwCo=hw.reduce((s,r)=>s+(r.cost_company||0),0), hwCl=hw.reduce((s,r)=>s+(r.cost_client||0),0), hwPr=hw.reduce((s,r)=>s+(r.proposal_cost||0),0)
+  const spCo=sup.reduce((s,r)=>s+(r.cost_company||0),0), spCl=sup.reduce((s,r)=>s+(r.cost_client||0),0), spPr=sup.reduce((s,r)=>s+(r.proposal_cost||0),0)
+  const expOk=expenses.filter(e=>e.status==='approved').reduce((s,e)=>s+(e.total_amount||e.amount||0),0)
+  const totalHrs=timelogs.reduce((s,l)=>s+(l.hours_worked||0),0)
+  const hrCost=rates.reduce((s,r)=>{ const eh=timelogs.filter(l=>l.employee?.id===r.employee_id).reduce((a,l)=>a+(l.hours_worked||0),0); return s+eh*(r.hourly_rate||r.monthly_salary/(22*8)) },0)
+  const raCost=ra.reduce((s,r)=>{ const rt=rates.find(x=>x.employee_id===r.employee_id); return s+(r.allocated_hours||0)*(rt?rt.hourly_rate||rt.monthly_salary/(22*8):0) },0)
+  const totalCo=hrCost+swCo+hwCo+spCo+expOk, totalCl=swCl+hwCl+spCl, totalPr=swPr+hwPr+spPr
+  const msBudget=milestones.reduce((s,m)=>s+(m.budget||0),0)
+  const avgRate=rates.length>0?rates.reduce((s,r)=>s+(r.hourly_rate||r.monthly_salary/(22*8)),0)/rates.length:0
+  const msSpent=milestones.reduce((s,m)=>{
+    const msHrs=m.start_date&&m.due_date?timelogs.filter(l=>l.work_date>=m.start_date&&l.work_date<=m.due_date).reduce((a,l)=>a+(l.hours_worked||0),0):0
+    const msSW=sw.filter(r=>r.milestone_id===m.id).reduce((a,r)=>a+(r.cost_company||0),0)
+    const msHW=hw.filter(r=>r.milestone_id===m.id).reduce((a,r)=>a+(r.cost_company||0),0)
+    const msSup=sup.filter(r=>r.milestone_id===m.id).reduce((a,r)=>a+(r.cost_company||0),0)
+    const msRA=ra.filter(r=>r.milestone_id===m.id).reduce((a,r)=>{ const rt=rates.find(x=>x.employee_id===r.employee_id); return a+(r.allocated_hours||0)*(rt?rt.hourly_rate||rt.monthly_salary/(22*8):0) },0)
+    return s+msHrs*avgRate+msSW+msHW+msSup+msRA
+  },0)
+  const msByHrs=milestones.map(m=>({id:m.id,title:m.title,budget:m.budget||0,
+    logged:m.start_date&&m.due_date?timelogs.filter(l=>l.work_date>=m.start_date&&l.work_date<=m.due_date).reduce((s,l)=>s+(l.hours_worked||0),0):0,
+    allocated:ra.filter(r=>r.milestone_id===m.id).reduce((s,r)=>s+(r.allocated_hours||0),0) }))
+  const expByMonth=MOS.map((mn,mi)=>({month:mn,
+    expenses:expenses.filter(e=>new Date(e.expense_date||e.created_at).getMonth()===mi).reduce((s,e)=>s+(e.total_amount||e.amount||0),0),
+    hrCost:timelogs.filter(l=>new Date(l.work_date).getMonth()===mi).reduce((s,l)=>s+(l.hours_worked||0),0)*avgRate }))
+  return { swCo,swCl,swPr, hwCo,hwCl,hwPr, spCo,spCl,spPr, expOk, totalHrs,hrCost,raCost, totalCo,totalCl,totalPr, msBudget,msSpent,msByHrs, expByMonth, totalHWCo:hwCo, totalSWCo:swCo }
+}
 
-  /* ─ detail state ─ */
-  const [detail,    setDetail]    = useState(null)   // selected project object
-  const [detailData,setDetailData]= useState(null)   // { expenses, timelogs, members, milestones }
-  const [detailLoad,setDetailLoad]= useState(false)
-
-  /* ─ milestone state ─ */
-  const [showMS,    setShowMS]    = useState(false)
-  const [editMS,    setEditMS]    = useState(null)
-  const [msForm,    setMsForm]    = useState(initMS())
-  const [delMS,     setDelMS]     = useState(null)
-  const [subMS,     setSubMS]     = useState(false)
-
-  useEffect(() => { loadList() }, [])
-
-  /* ═══ LIST ═══════════════════════════════════════════════ */
-  async function loadList() {
-    setLoading(true)
-    const { data } = await supabase.from('projects').select('*').order('created_at', { ascending:false })
-    setProjects(data || [])
-    setLoading(false)
-  }
-
-  async function saveProject(e) {
-    e.preventDefault()
-    try {
-      const p = { name:form.name, description:form.description||null, budget:parseFloat(form.budget)||0,
-                  start_date:form.start_date||null, end_date:form.end_date||null, status:form.status }
-      if (editing) await supabase.from('projects').update(p).eq('id',editing.id)
-      else { const code='PRJ-'+Date.now().toString().slice(-6); await supabase.from('projects').insert({...p,code,created_by:profile.id}) }
-      setShowModal(false); loadList()
-      if (detail?.id === editing?.id) openDetail({ ...detail, ...p })
-    } catch(e) { alert(e.message) }
-  }
-
-  /* ═══ DETAIL ═════════════════════════════════════════════ */
-  async function openDetail(proj) {
-    setDetail(proj); setDetailLoad(true); setDetailData(null)
-    const [expRes, logRes, msRes] = await Promise.all([
-      supabase.from('expense_requests').select('amount,total_amount,status,expense_date,category,requester:profiles!requested_by(full_name)').eq('project_id', proj.id),
-      supabase.from('time_logs').select('hours_worked,work_date,employee:profiles!employee_id(full_name,role)').eq('project_id', proj.id),
-      supabase.from('project_milestones').select('*').eq('project_id', proj.id).order('due_date'),
-    ])
-    setDetailData({
-      expenses:   expRes.data || [],
-      timelogs:   logRes.data || [],
-      milestones: msRes.data || [],
-    })
-    setDetailLoad(false)
-  }
-
-  /* ═══ MILESTONES ══════════════════════════════════════════ */
-  async function saveMS(e) {
-    e.preventDefault(); setSubMS(true)
-    try {
-      const p = { title:msForm.title, description:msForm.description||null,
-                  start_date:msForm.start_date||null, due_date:msForm.due_date||null,
-                  actual_start:msForm.actual_start||null, actual_end:msForm.actual_end||null,
-                  budget:parseFloat(msForm.budget)||0,
-                  status:msForm.status, project_id:detail.id }
-      if (editMS) await supabase.from('project_milestones').update(p).eq('id',editMS.id)
-      else await supabase.from('project_milestones').insert({ ...p, created_by:profile.id })
-      setShowMS(false); setEditMS(null); setMsForm(initMS()); openDetail(detail)
-    } catch(e) { alert(e.message) }
-    finally { setSubMS(false) }
-  }
-
-  async function deleteMS(id) {
-    await supabase.from('project_milestones').delete().eq('id', id)
-    setDelMS(null); openDetail(detail)
-  }
-
-  /* ═══ COMPUTED ════════════════════════════════════════════ */
-  const filtered = projects.filter(p => !search ||
-    p.name?.toLowerCase().includes(search.toLowerCase()))
-
-  function buildExpenseChart(expenses) {
-    const map = {}
-    expenses.forEach(e => {
-      const m = MONTHS[new Date(e.expense_date || e.created_at).getMonth()]
-      map[m] = (map[m]||0) + (e.total_amount || e.amount || 0)
-    })
-    return MONTHS.map(m => ({ month:m, amount: map[m]||0 }))
-  }
-
-  function buildResourceMatrix(timelogs) {
-    const map = {}
-    timelogs.forEach(l => {
-      const name = l.employee?.full_name || 'Unknown'
-      map[name] = (map[name]||0) + (l.hours_worked||0)
-    })
-    return Object.entries(map)
-      .map(([name, hours]) => ({ name, hours: Math.round(hours*10)/10 }))
-      .sort((a,b) => b.hours - a.hours)
-  }
-
-  function buildCategoryPie(expenses) {
-    const map = {}
-    expenses.forEach(e => { map[e.category||'Other'] = (map[e.category||'Other']||0) + (e.total_amount||e.amount||0) })
-    return Object.entries(map).map(([name,value]) => ({ name, value })).slice(0,6)
-  }
-
-  /* ═══ RENDER — DETAIL VIEW ════════════════════════════════ */
-  if (detail) {
-    const proj    = detail
-    const data    = detailData
-    const pct     = proj.budget>0 ? Math.min(100,Math.round((proj.spent/proj.budget)*100)) : 0
-    const over    = proj.spent > proj.budget
-    const sc      = STATUS_C[proj.status] || '#6366f1'
-    const expChart= data ? buildExpenseChart(data.expenses) : []
-    const resMatrix=data ? buildResourceMatrix(data.timelogs) : []
-    const catPie  = data ? buildCategoryPie(data.expenses) : []
-    const totalExp= data ? data.expenses.reduce((s,e)=>s+(e.total_amount||e.amount||0),0) : 0
-    const totalHrs= data ? data.timelogs.reduce((s,l)=>s+(l.hours_worked||0),0) : 0
-    const msTotal = data ? data.milestones.reduce((s,m)=>s+(m.budget||0),0) : 0
-    const msDone  = data ? data.milestones.filter(m=>m.status==='completed').length : 0
-
-    return (
-      <div>
-        {/* Back + header */}
-        <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:24 }}>
-          <button className="btn btn-ghost btn-sm" onClick={() => setDetail(null)} style={{ display:'flex', alignItems:'center', gap:6 }}>
-            <ArrowLeft size={15} /> All Projects
-          </button>
-          <ChevronRight size={14} style={{ color:'#94a3b8' }} />
-          <span style={{ fontWeight:700, fontSize:16 }}>{proj.name}</span>
-          <span style={{ padding:'3px 10px', borderRadius:999, fontSize:11, fontWeight:700, background:`${sc}15`, color:sc, textTransform:'capitalize', marginLeft:4 }}>{proj.status}</span>
-          {canEdit && (
-            <div style={{ marginLeft:'auto', display:'flex', gap:8 }}>
-              <button className="btn btn-outline btn-sm" onClick={() => { setEditing(proj); setForm({ name:proj.name, description:proj.description||'', budget:proj.budget||'', start_date:proj.start_date||'', end_date:proj.end_date||'', status:proj.status }); setShowModal(true) }}>
-                <Edit2 size={13} /> Edit Project
-              </button>
-              <button className="btn btn-primary btn-sm" onClick={() => { setEditMS(null); setMsForm(initMS()); setShowMS(true) }}>
-                <Plus size={13} /> Add Milestone
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* KPI strip */}
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))', gap:12, marginBottom:24 }}>
-          {[
-            { l:'Total Budget',  v:rupee(proj.budget),       c:'#6366f1', icon:<DollarSign size={16}/> },
-            { l:'Total Spent',   v:rupee(proj.spent||0),     c:'#f59e0b', icon:<TrendingUp size={16}/> },
-            { l:'Remaining',     v:rupee((proj.budget||0)-(proj.spent||0)), c:over?'#ef4444':'#10b981', icon:<Target size={16}/> },
-            { l:'Expense Total', v:rupee(totalExp),          c:'#ec4899', icon:<DollarSign size={16}/> },
-            { l:'Hours Logged',  v:`${Math.round(totalHrs)}h`, c:'#3b82f6', icon:<Clock size={16}/> },
-            { l:'Milestones',    v:data ? `${msDone}/${data.milestones.length}` : '—', c:'#8b5cf6', icon:<Flag size={16}/> },
-          ].map(s=>(
-            <div key={s.l} style={{ background:'#fff', borderRadius:14, padding:'14px 16px', border:`1.5px solid ${s.c}20`, borderTop:`4px solid ${s.c}` }}>
-              <div style={{ color:s.c, marginBottom:6 }}>{s.icon}</div>
-              <div style={{ fontSize:18, fontWeight:800, color:s.c, lineHeight:1 }}>{s.v}</div>
-              <div style={{ fontSize:11, color:'#64748b', fontWeight:600, marginTop:4 }}>{s.l}</div>
-            </div>
-          ))}
-        </div>
-
-        {/* Budget bar */}
-        <div style={{ background:'#fff', borderRadius:14, border:'1.5px solid #e2e8f0', padding:'16px 20px', marginBottom:20 }}>
-          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:8, fontSize:13, fontWeight:600 }}>
-            <span>Budget Utilization</span>
-            <span style={{ color: over?'#ef4444':'#10b981' }}>{pct}% used{over?' ⚠ OVER BUDGET':''}</span>
-          </div>
-          <div style={{ height:10, background:'#f1f5f9', borderRadius:99, overflow:'hidden' }}>
-            <div style={{ height:'100%', width:`${Math.min(pct,100)}%`, background: over?'#ef4444':pct>75?'#f59e0b':'#10b981', borderRadius:99, transition:'width .3s' }} />
-          </div>
-          <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, color:'#64748b', marginTop:6 }}>
-            <span>Spent: {rupee(proj.spent||0)}</span>
-            <span>Milestone alloc: {rupee(msTotal)}</span>
-            <span>Budget: {rupee(proj.budget)}</span>
-          </div>
-        </div>
-
-        {detailLoad ? (
-          <div style={{ display:'flex', alignItems:'center', justifyContent:'center', padding:60 }}><div className="spinner" /></div>
-        ) : data && (
-          <>
-            {/* Charts row */}
-            <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:16, marginBottom:20 }}>
-              {/* Expense by month */}
-              <div style={{ background:'#fff', borderRadius:14, border:'1.5px solid #e2e8f0', overflow:'hidden' }}>
-                <div style={{ padding:'14px 20px', borderBottom:'1px solid #f1f5f9', fontWeight:700, fontSize:14 }}>
-                  💰 Monthly Expense Spend
-                </div>
-                <div style={{ padding:'16px 20px' }}>
-                  {expChart.every(d=>d.amount===0) ? (
-                    <div style={{ textAlign:'center', padding:'40px 0', color:'#94a3b8' }}>No expenses linked yet</div>
-                  ) : (
-                    <ResponsiveContainer width="100%" height={200}>
-                      <AreaChart data={expChart}>
-                        <defs>
-                          <linearGradient id="expGrad" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#6366f1" stopOpacity={0.25}/>
-                            <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-                        <XAxis dataKey="month" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-                        <YAxis tick={{ fontSize:10 }} tickFormatter={v=>`₹${(v/1000).toFixed(0)}K`} axisLine={false} tickLine={false} />
-                        <Tooltip formatter={v=>[rupee(v),'Expenses']} contentStyle={{ borderRadius:10, fontSize:12, border:'1px solid #e2e8f0' }} />
-                        <Area type="monotone" dataKey="amount" stroke="#6366f1" fill="url(#expGrad)" strokeWidth={2.5} dot={false} />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  )}
-                </div>
-              </div>
-
-              {/* Category pie */}
-              <div style={{ background:'#fff', borderRadius:14, border:'1.5px solid #e2e8f0', overflow:'hidden' }}>
-                <div style={{ padding:'14px 20px', borderBottom:'1px solid #f1f5f9', fontWeight:700, fontSize:14 }}>
-                  📊 Spend by Category
-                </div>
-                <div style={{ padding:'16px 20px' }}>
-                  {catPie.length === 0 ? (
-                    <div style={{ textAlign:'center', padding:'40px 0', color:'#94a3b8', fontSize:13 }}>No data</div>
-                  ) : (
-                    <>
-                      <ResponsiveContainer width="100%" height={140}>
-                        <PieChart>
-                          <Pie data={catPie} cx="50%" cy="50%" innerRadius={35} outerRadius={60} dataKey="value" paddingAngle={3}>
-                            {catPie.map((_,i)=><Cell key={i} fill={PIE_CLR[i%PIE_CLR.length]}/>)}
-                          </Pie>
-                          <Tooltip formatter={v=>[rupee(v)]} contentStyle={{ borderRadius:10, fontSize:11 }} />
-                        </PieChart>
-                      </ResponsiveContainer>
-                      <div style={{ display:'flex', flexDirection:'column', gap:4, marginTop:4 }}>
-                        {catPie.map((d,i)=>(
-                          <div key={d.name} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', fontSize:11 }}>
-                            <div style={{ display:'flex', alignItems:'center', gap:5 }}>
-                              <div style={{ width:8, height:8, borderRadius:2, background:PIE_CLR[i%PIE_CLR.length] }}/>
-                              <span style={{ color:'#475569' }}>{d.name}</span>
-                            </div>
-                            <span style={{ fontWeight:700, color:PIE_CLR[i%PIE_CLR.length] }}>{rupee(d.value)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Resource utilization matrix */}
-            <div style={{ background:'#fff', borderRadius:14, border:'1.5px solid #e2e8f0', overflow:'hidden', marginBottom:20 }}>
-              <div style={{ padding:'14px 20px', borderBottom:'1px solid #f1f5f9', fontWeight:700, fontSize:14 }}>
-                👥 Resource Utilization Matrix
-              </div>
-              {resMatrix.length === 0 ? (
-                <div style={{ padding:'40px 20px', textAlign:'center', color:'#94a3b8' }}>No time logs for this project yet</div>
-              ) : (
-                <div style={{ padding:'16px 20px' }}>
-                  <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))', gap:10, marginBottom:16 }}>
-                    {resMatrix.map((r,i)=>{
-                      const maxHrs = resMatrix[0]?.hours || 1
-                      const pct = Math.round((r.hours/maxHrs)*100)
-                      return (
-                        <div key={r.name} style={{ padding:'12px 14px', borderRadius:12, background:`${PIE_CLR[i%PIE_CLR.length]}08`, border:`1.5px solid ${PIE_CLR[i%PIE_CLR.length]}20` }}>
-                          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}>
-                            <span style={{ fontWeight:700, fontSize:13 }}>{r.name.split(' ')[0]}</span>
-                            <span style={{ fontWeight:800, fontSize:14, color:PIE_CLR[i%PIE_CLR.length] }}>{r.hours}h</span>
-                          </div>
-                          <div style={{ height:6, background:'#f1f5f9', borderRadius:99, overflow:'hidden' }}>
-                            <div style={{ height:'100%', width:`${pct}%`, background:PIE_CLR[i%PIE_CLR.length], borderRadius:99 }}/>
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                  {/* Bar chart */}
-                  <ResponsiveContainer width="100%" height={180}>
-                    <BarChart data={resMatrix.slice(0,8)} barSize={20}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-                      <XAxis dataKey="name" tick={{ fontSize:10 }} tickFormatter={v=>v.split(' ')[0]} axisLine={false} tickLine={false} />
-                      <YAxis tick={{ fontSize:10 }} tickFormatter={v=>`${v}h`} axisLine={false} tickLine={false} />
-                      <Tooltip formatter={v=>[`${v} hours`,'Hours Worked']} contentStyle={{ borderRadius:10, fontSize:12 }} />
-                      <Bar dataKey="hours" fill="#6366f1" radius={[4,4,0,0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-            </div>
-
-            {/* Milestones */}
-            <div style={{ background:'#fff', borderRadius:14, border:'1.5px solid #e2e8f0', overflow:'hidden' }}>
-              <div style={{ padding:'14px 20px', borderBottom:'1px solid #f1f5f9', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-                <span style={{ fontWeight:700, fontSize:14 }}>🏁 Milestones ({data.milestones.length})</span>
-                {canEdit && (
-                  <button className="btn btn-primary btn-sm" onClick={() => { setEditMS(null); setMsForm(initMS()); setShowMS(true) }}>
-                    <Plus size={13} /> Add Milestone
-                  </button>
-                )}
-              </div>
-              {data.milestones.length === 0 ? (
-                <div style={{ padding:'40px 20px', textAlign:'center', color:'#94a3b8' }}>
-                  <div style={{ fontSize:32, marginBottom:8 }}>🏁</div>
-                  No milestones yet — add one to track project progress
-                </div>
-              ) : (
-                <div style={{ padding:'16px 20px', display:'flex', flexDirection:'column', gap:10 }}>
-                  {data.milestones.map((ms,i)=>{
-                    const mc = MS_COLORS[ms.status] || '#94a3b8'
-                    return (
-                      <div key={ms.id} style={{ display:'flex', gap:14, padding:'14px 16px', borderRadius:12, border:`1.5px solid ${mc}25`, background:`${mc}06`, position:'relative' }}>
-                        {/* Timeline dot */}
-                        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', flexShrink:0 }}>
-                          <div style={{ width:14, height:14, borderRadius:'50%', background:mc, border:`2px solid #fff`, boxShadow:`0 0 0 2px ${mc}` }}/>
-                          {i < data.milestones.length-1 && <div style={{ width:2, flex:1, background:`${mc}30`, marginTop:4 }}/>}
-                        </div>
-                        <div style={{ flex:1 }}>
-                          <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8 }}>
-                            <div>
-                              <div style={{ fontWeight:700, fontSize:14 }}>{ms.title}</div>
-                              {ms.description && <div style={{ fontSize:12, color:'#64748b', marginTop:2 }}>{ms.description}</div>}
-                              <div style={{ display:'flex', gap:12, marginTop:6, fontSize:12, flexWrap:'wrap' }}>
-                                {ms.start_date && <span style={{ color:'#64748b', display:'flex', alignItems:'center', gap:4 }}>📅 {dateFmt(ms.start_date)}</span>}{ms.due_date && <span style={{ color:'#64748b', display:'flex', alignItems:'center', gap:4 }}>🏁 {dateFmt(ms.due_date)}</span>}{ms.actual_start && <span style={{ color:'#10b981', fontSize:11 }}>✓ Started {dateFmt(ms.actual_start)}</span>}{ms.actual_end && <span style={{ color:'#6366f1', fontSize:11 }}>✓ Done {dateFmt(ms.actual_end)}</span>}
-                                {ms.budget > 0 && <span style={{ color:'#6366f1', fontWeight:700 }}>₹{ms.budget.toLocaleString('en-IN')}</span>}
-                              </div>
-                            </div>
-                            <div style={{ display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
-                              <span style={{ padding:'3px 10px', borderRadius:999, fontSize:11, fontWeight:700, background:`${mc}15`, color:mc, textTransform:'capitalize' }}>{ms.status?.replace('_',' ')}</span>
-                              {canEdit && <>
-                                <button className="btn btn-ghost btn-sm btn-icon" onClick={() => { setEditMS(ms); setMsForm({ title:ms.title, description:ms.description||'', start_date:ms.start_date||'', due_date:ms.due_date||'', actual_start:ms.actual_start||'', actual_end:ms.actual_end||'', budget:ms.budget||'', status:ms.status||'pending' }); setShowMS(true) }}><Edit2 size={12}/></button>
-                                <button className="btn btn-ghost btn-sm btn-icon" style={{ color:'#ef4444' }} onClick={() => setDelMS(ms.id)}><Trash2 size={12}/></button>
-                              </>}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Expense list */}
-            {data.expenses.length > 0 && (
-              <div style={{ background:'#fff', borderRadius:14, border:'1.5px solid #e2e8f0', overflow:'hidden', marginTop:20 }}>
-                <div style={{ padding:'14px 20px', borderBottom:'1px solid #f1f5f9', fontWeight:700, fontSize:14 }}>🧾 Linked Expenses ({data.expenses.length})</div>
-                <table style={{ width:'100%', borderCollapse:'collapse' }}>
-                  <thead><tr style={{ background:'#f8fafc' }}>
-                    <th style={{ padding:'10px 16px', textAlign:'left', fontSize:11, fontWeight:700, color:'#94a3b8', textTransform:'uppercase' }}>Requester</th>
-                    <th style={{ padding:'10px 16px', textAlign:'left', fontSize:11, fontWeight:700, color:'#94a3b8', textTransform:'uppercase' }}>Category</th>
-                    <th style={{ padding:'10px 16px', textAlign:'left', fontSize:11, fontWeight:700, color:'#94a3b8', textTransform:'uppercase' }}>Amount</th>
-                    <th style={{ padding:'10px 16px', textAlign:'left', fontSize:11, fontWeight:700, color:'#94a3b8', textTransform:'uppercase' }}>Status</th>
-                    <th style={{ padding:'10px 16px', textAlign:'left', fontSize:11, fontWeight:700, color:'#94a3b8', textTransform:'uppercase' }}>Date</th>
-                  </tr></thead>
-                  <tbody>
-                    {data.expenses.slice(0,10).map((e,i)=>(
-                      <tr key={i} style={{ borderBottom:'1px solid #f1f5f9' }}>
-                        <td style={{ padding:'10px 16px', fontSize:13, fontWeight:600 }}>{e.requester?.full_name||'—'}</td>
-                        <td style={{ padding:'10px 16px' }}><span style={{ padding:'2px 8px', borderRadius:999, fontSize:11, fontWeight:700, background:'#dbeafe', color:'#1d4ed8' }}>{e.category}</span></td>
-                        <td style={{ padding:'10px 16px', fontWeight:700 }}>{rupee(e.total_amount||e.amount)}</td>
-                        <td style={{ padding:'10px 16px' }}><span style={{ padding:'2px 8px', borderRadius:999, fontSize:11, fontWeight:700, background:e.status==='approved'?'#dcfce7':e.status==='rejected'?'#fee2e2':'#fef3c7', color:e.status==='approved'?'#15803d':e.status==='rejected'?'#dc2626':'#b45309', textTransform:'capitalize' }}>{e.status}</span></td>
-                        <td style={{ padding:'10px 16px', fontSize:12, color:'#64748b' }}>{dateFmt(e.expense_date)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </>
-        )}
-
-        {/* Edit Project Modal */}
-        <Modal open={showModal} onClose={() => setShowModal(false)} title={editing ? 'Edit Project' : 'New Project'}
-          footer={<>
-            <button className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancel</button>
-            <button className="btn btn-primary" onClick={saveProject}>{editing ? 'Update' : 'Create'}</button>
-          </>}>
-          <ProjectForm form={form} setForm={setForm} />
-        </Modal>
-
-        {/* Milestone Modal */}
-        <Modal open={showMS} onClose={() => setShowMS(false)} title={editMS ? 'Edit Milestone' : 'Add Milestone'} size="lg"
-          footer={<>
-            <button className="btn btn-ghost" onClick={() => setShowMS(false)}>Cancel</button>
-            <button className="btn btn-primary" onClick={saveMS} disabled={subMS}>{subMS ? 'Saving…' : editMS ? 'Update' : 'Add Milestone'}</button>
-          </>}>
-          <div className="form-group">
-            <label className="form-label">Milestone Title *</label>
-            <input className="form-input" value={msForm.title} onChange={e=>setMsForm(f=>({...f,title:e.target.value}))} placeholder="e.g. Phase 1 Complete" required />
-          </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Planned Start Date</label>
-              <input className="form-input" type="date" value={msForm.start_date} onChange={e=>setMsForm(f=>({...f,start_date:e.target.value}))} />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Planned End / Due Date</label>
-              <input className="form-input" type="date" value={msForm.due_date} onChange={e=>setMsForm(f=>({...f,due_date:e.target.value}))} />
-            </div>
-          </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Actual Start Date</label>
-              <input className="form-input" type="date" value={msForm.actual_start} onChange={e=>setMsForm(f=>({...f,actual_start:e.target.value}))} />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Actual End Date</label>
-              <input className="form-input" type="date" value={msForm.actual_end} onChange={e=>setMsForm(f=>({...f,actual_end:e.target.value}))} />
-            </div>
-          </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Budget Allocated (₹)</label>
-              <div style={{ position:'relative' }}>
-                <span style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', color:'#64748b', fontWeight:700 }}>₹</span>
-                <input className="form-input" type="number" value={msForm.budget} onChange={e=>setMsForm(f=>({...f,budget:e.target.value}))} placeholder="0" style={{ paddingLeft:24 }} />
-              </div>
-            </div>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Status</label>
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:8 }}>
-              {MS_STATUS.map(s=>{
-                const mc = MS_COLORS[s]
-                return (
-                  <button key={s} type="button" onClick={()=>setMsForm(f=>({...f,status:s}))}
-                    style={{ padding:'8px 4px', borderRadius:10, border:`2px solid ${msForm.status===s?mc:'#e2e8f0'}`, background:msForm.status===s?`${mc}15`:'#fff', color:msForm.status===s?mc:'#475569', fontWeight:700, fontSize:11, cursor:'pointer', textAlign:'center', textTransform:'capitalize' }}>
-                    {s.replace('_',' ')}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Description</label>
-            <textarea className="form-textarea" value={msForm.description} onChange={e=>setMsForm(f=>({...f,description:e.target.value}))} placeholder="What needs to be done for this milestone?" />
-          </div>
-          {detail && (
-            <div style={{ padding:'10px 14px', borderRadius:10, background:'#f0fdf4', border:'1px solid #bbf7d0', fontSize:12 }}>
-              <span style={{ fontWeight:700, color:'#15803d' }}>Project: </span>
-              <span style={{ color:'#15803d' }}>{detail.name}</span>
-              {msForm.budget > 0 && <span style={{ color:'#15803d', marginLeft:10 }}>• Allocating {rupee(parseFloat(msForm.budget)||0)}</span>}
-            </div>
-          )}
-        </Modal>
-
-        <Confirm open={!!delMS} message="Delete this milestone?" danger onConfirm={()=>deleteMS(delMS)} onCancel={()=>setDelMS(null)} />
-      </div>
-    )
-  }
-
-  /* ═══ RENDER — LIST VIEW ══════════════════════════════════ */
-  const CARD_COLORS = ['#6366f1','#ec4899','#f59e0b','#10b981','#3b82f6','#8b5cf6','#ef4444','#14b8a6']
-  if (loading) return <Loader />
-
+/* ─── Category Manager ──────────────────────────────────── */
+function CatManager({cats,setCats,label}) {
+  const [v,setV]=useState('')
   return (
-    <div>
-      <div className="page-header">
-        <div><div className="page-title">Project Management</div><div className="page-subtitle">ThingsaliveWork — Track projects, budgets and milestones</div></div>
-        {canEdit && <button className="btn btn-primary" onClick={() => { setEditing(null); setForm(initProj()); setShowModal(true) }}><Plus size={15}/> New Project</button>}
-      </div>
-
-      <div className="stats-grid" style={{ marginBottom:20 }}>
-        {[
-          { l:'Total',    v:projects.length,                                     c:'#6366f1' },
-          { l:'Active',   v:projects.filter(p=>p.status==='active').length,      c:'#10b981' },
-          { l:'Budget',   v:rupee(projects.reduce((s,p)=>s+(p.budget||0),0)),   c:'#3b82f6' },
-          { l:'Spent',    v:rupee(projects.reduce((s,p)=>s+(p.spent||0),0)),    c:'#f59e0b' },
-          { l:'Remaining',v:rupee(projects.reduce((s,p)=>s+(p.budget||0)-(p.spent||0),0)), c:'#8b5cf6' },
-        ].map(s=>(
-          <div key={s.l} className="stat-card" style={{ borderTopColor:s.c }}>
-            <div className="stat-value" style={{ fontSize:18, color:s.c }}>{s.v}</div>
-            <div className="stat-label">{s.l}</div>
-          </div>
+    <div style={{marginBottom:12,padding:'10px 12px',borderRadius:8,background:'var(--surface-2)',border:'1px solid var(--border)'}}>
+      <div style={{fontSize:10,fontWeight:700,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>{label} Categories</div>
+      <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:8}}>
+        {cats.map(c=>(
+          <span key={c} style={{display:'flex',alignItems:'center',gap:3,padding:'3px 10px',borderRadius:999,background:'var(--c1-soft)',color:'var(--c1)',fontSize:11,fontWeight:600}}>
+            {c}<button onClick={()=>setCats(p=>p.filter(x=>x!==c))} style={{background:'none',border:'none',cursor:'pointer',color:'var(--rose)',fontSize:14,lineHeight:1,padding:'0 0 0 2px'}}>×</button>
+          </span>
         ))}
       </div>
-
-      <div style={{ marginBottom:16 }}><SearchBox value={search} onChange={setSearch} placeholder="Search projects…" /></div>
-
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))', gap:16 }}>
-        {filtered.length === 0 ? <div style={{ gridColumn:'1/-1' }}><Empty icon="📁" title="No projects" desc="Create your first project" /></div>
-        : filtered.map((p,idx)=>{
-          const color = CARD_COLORS[idx%CARD_COLORS.length]
-          const pct = p.budget>0 ? Math.min(100,Math.round((p.spent/p.budget)*100)) : 0
-          const over = p.spent > p.budget
-          const sc = STATUS_C[p.status] || '#6366f1'
-          return (
-            <div key={p.id} style={{ background:'#fff', borderRadius:16, border:'1.5px solid #e2e8f0', overflow:'hidden', boxShadow:'0 1px 4px rgba(0,0,0,.04)', cursor:'pointer', transition:'all .15s' }}
-              onMouseEnter={e=>{e.currentTarget.style.transform='translateY(-2px)';e.currentTarget.style.boxShadow='0 8px 24px rgba(0,0,0,.1)'}}
-              onMouseLeave={e=>{e.currentTarget.style.transform='';e.currentTarget.style.boxShadow='0 1px 4px rgba(0,0,0,.04)'}}>
-              <div style={{ height:5, background:`linear-gradient(90deg,${color},${color}88)` }} />
-              <div style={{ padding:'18px 20px' }}>
-                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10 }}>
-                  <div style={{ width:40, height:40, borderRadius:12, background:`${color}12`, display:'flex', alignItems:'center', justifyContent:'center', color }}>
-                    <FolderOpen size={20}/>
-                  </div>
-                  <div style={{ display:'flex', gap:6, alignItems:'center' }}>
-                    <span style={{ padding:'3px 10px', borderRadius:999, fontSize:11, fontWeight:700, background:`${sc}15`, color:sc, textTransform:'capitalize' }}>{p.status}</span>
-                    {canEdit && <>
-                      <button className="btn btn-ghost btn-sm btn-icon" onClick={e=>{e.stopPropagation();setEditing(p);setForm({name:p.name,description:p.description||'',budget:p.budget||'',start_date:p.start_date||'',end_date:p.end_date||'',status:p.status});setShowModal(true)}} title="Edit"><Edit2 size={12}/></button>
-                      <button className="btn btn-ghost btn-sm btn-icon" style={{color:'#ef4444'}} onClick={e=>{e.stopPropagation();setDelProj(p.id)}} title="Delete"><Trash2 size={12}/></button>
-                    </>}
-                  </div>
-                </div>
-                <div style={{ fontWeight:800, fontSize:16, marginBottom:4 }}>{p.name}</div>
-                {p.code && <div style={{ fontFamily:'monospace', fontSize:11, color:'#94a3b8', marginBottom:6 }}>{p.code}</div>}
-                {p.description && <div style={{ fontSize:12.5, color:'#64748b', marginBottom:12, lineHeight:1.5, display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{p.description}</div>}
-                <div style={{ marginBottom:10 }}>
-                  <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, marginBottom:4 }}>
-                    <span style={{ color:'#94a3b8' }}>Budget used</span>
-                    <span style={{ fontWeight:700, color:over?'#ef4444':color }}>{pct}%{over?' ⚠':''}</span>
-                  </div>
-                  <div style={{ height:6, background:'#f1f5f9', borderRadius:99, overflow:'hidden' }}>
-                    <div style={{ height:'100%', width:`${pct}%`, background:over?'#ef4444':pct>75?'#f59e0b':color, borderRadius:99 }}/>
-                  </div>
-                  <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, marginTop:4, color:'#94a3b8' }}>
-                    <span>{rupee(p.spent||0)} spent</span><span>{rupee(p.budget)} budget</span>
-                  </div>
-                </div>
-                {(p.start_date||p.end_date) && (
-                  <div style={{ fontSize:11, color:'#94a3b8', borderTop:'1px solid #f1f5f9', paddingTop:10, display:'flex', gap:12, marginBottom:10 }}>
-                    {p.start_date && <span>📅 {dateFmt(p.start_date)}</span>}
-                    {p.end_date && <span>🏁 {dateFmt(p.end_date)}</span>}
-                  </div>
-                )}
-                {/* View Detail button */}
-                <button className="btn btn-ghost btn-sm" style={{ width:'100%', justifyContent:'center', borderColor:`${color}30`, color }} onClick={()=>openDetail(p)}>
-                  <Eye size={13}/> View Details & Milestones
-                </button>
-              </div>
-            </div>
-          )
-        })}
+      <div style={{display:'flex',gap:6}}>
+        <input className="form-input" style={{flex:1,fontSize:12}} value={v} onChange={e=>setV(e.target.value)} placeholder="New category…"
+          onKeyDown={e=>{ if(e.key==='Enter'&&v.trim()){ setCats(p=>[...p,v.trim().toLowerCase()]); setV('') } }}/>
+        <button className="btn btn-primary btn-sm" onClick={()=>{ if(v.trim()){ setCats(p=>[...p,v.trim().toLowerCase()]); setV('') } }}>Add</button>
       </div>
-
-      <Modal open={showModal} onClose={() => setShowModal(false)} title={editing ? 'Edit Project' : 'New Project'}
-        footer={<>
-          <button className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancel</button>
-          <button className="btn btn-primary" onClick={saveProject}>{editing ? 'Update' : 'Create Project'}</button>
-        </>}>
-        <ProjectForm form={form} setForm={setForm} />
-      </Modal>
-
-      <Confirm open={!!delProj} message="Delete this project? All linked expenses will remain but will lose project association." danger
-        onConfirm={async()=>{ await supabase.from('projects').delete().eq('id',delProj); setDelProj(null); loadList() }}
-        onCancel={()=>setDelProj(null)} />
     </div>
   )
 }
 
-function ProjectForm({ form, setForm }) {
-  return (
-    <>
-      <div className="form-group"><label className="form-label">Project Name *</label>
-        <input className="form-input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. ThingsaliveWork" required /></div>
-      <div className="form-group"><label className="form-label">Status</label>
-        <select className="form-select" value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}>
-          {['active','on_hold','completed','cancelled'].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1).replace('_',' ')}</option>)}
+/* ─── Cost Form Components ──────────────────────────────── */
+function SWForm({form,setForm,cats,setCats,ms}) {
+  function auto(co) { const v=parseFloat(co)||0; setForm(f=>({...f,cost_company:co,cost_client:f.cost_client||String((v*1.3).toFixed(0)),proposal_cost:f.proposal_cost||String((v*1.5).toFixed(0))})) }
+  function qty(q,up) { const c=(q*up).toFixed(0); setForm(f=>({...f,qty:String(q),unit_price:String(up),cost_company:c,cost_client:String((q*up*1.3).toFixed(0)),proposal_cost:String((q*up*1.5).toFixed(0))})) }
+  return (<>
+    <CatManager cats={cats} setCats={setCats} label="Software"/>
+    <div className="form-row">
+      <div className="form-group"><label className="form-label">Name *</label><input className="form-input" value={form.name||''} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. AWS EC2, Twilio" required/></div>
+      <div className="form-group"><label className="form-label">Category</label>
+        <select className="form-select" value={form.category||cats[0]||'other'} onChange={e=>setForm(f=>({...f,category:e.target.value}))}>
+          {cats.map(c=><option key={c} value={c}>{c.replace('_',' ')}</option>)}
         </select></div>
-      <div className="form-row">
-        <div className="form-group"><label className="form-label">Budget (₹)</label>
-          <div style={{position:'relative'}}><span style={{position:'absolute',left:10,top:'50%',transform:'translateY(-50%)',color:'#64748b',fontWeight:700}}>₹</span>
-          <input className="form-input" type="number" value={form.budget} onChange={e=>setForm(f=>({...f,budget:e.target.value}))} placeholder="0" style={{paddingLeft:24}}/></div></div>
-        <div className="form-group"><label className="form-label">Start Date</label>
-          <input className="form-input" type="date" value={form.start_date} onChange={e=>setForm(f=>({...f,start_date:e.target.value}))}/></div>
+    </div>
+    <div className="form-row">
+      <div className="form-group"><label className="form-label">Qty / Seats</label>
+        <input className="form-input" type="number" min="1" value={form.qty||1} onChange={e=>{ const q=parseFloat(e.target.value)||1,up=parseFloat(form.unit_price)||0; if(up>0) qty(q,up); else setForm(f=>({...f,qty:e.target.value})) }}/></div>
+      <div className="form-group"><label className="form-label">Unit Price (₹)</label>
+        <input className="form-input" type="number" value={form.unit_price||''} onChange={e=>{ const up=parseFloat(e.target.value)||0,q=parseFloat(form.qty)||1; if(up>0) qty(q,up); else setForm(f=>({...f,unit_price:e.target.value})) }} placeholder="Per seat/month"/></div>
+    </div>
+    {parseFloat(form.unit_price)>0&&<div style={{padding:'6px 12px',borderRadius:6,background:'var(--c1-soft)',fontSize:12,fontWeight:600,color:'var(--c1)',marginBottom:8}}>Auto total: {rupee((parseFloat(form.qty)||1)*(parseFloat(form.unit_price)||0))}</div>}
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+      <div className="form-group"><label className="form-label">Cost to Company (₹)</label><input className="form-input" type="number" value={form.cost_company||''} onChange={e=>auto(e.target.value)}/></div>
+      <div className="form-group"><label className="form-label">Cost to Client ×1.3</label><input className="form-input" type="number" value={form.cost_client||''} onChange={e=>setForm(f=>({...f,cost_client:e.target.value}))}/></div>
+      <div className="form-group"><label className="form-label">Proposal ×1.5</label><input className="form-input" type="number" value={form.proposal_cost||''} onChange={e=>setForm(f=>({...f,proposal_cost:e.target.value}))}/></div>
+    </div>
+    <div className="form-row">
+      <div className="form-group"><label className="form-label">Billing</label>
+        <select className="form-select" value={form.billing_cycle||'monthly'} onChange={e=>setForm(f=>({...f,billing_cycle:e.target.value}))}>
+          {['monthly','yearly','quarterly','one_time'].map(c=><option key={c} value={c}>{c.replace('_',' ')}</option>)}
+        </select></div>
+      <div className="form-group"><label className="form-label">Milestone</label>
+        <select className="form-select" value={form.milestone_id||''} onChange={e=>setForm(f=>({...f,milestone_id:e.target.value}))}>
+          <option value="">No milestone</option>{ms.map(m=><option key={m.id} value={m.id}>{m.title}</option>)}
+        </select></div>
+    </div>
+    <div className="form-group"><label className="form-label">Notes</label><textarea className="form-textarea" rows={2} value={form.notes||''} onChange={e=>setForm(f=>({...f,notes:e.target.value}))}/></div>
+  </>)
+}
+
+function HWForm({form,setForm,cats,setCats,ms}) {
+  function qty(q,up) { const c=(q*up).toFixed(0); setForm(f=>({...f,qty:String(q),unit_price:String(up),cost_company:c,cost_client:String((q*up*1.3).toFixed(0)),proposal_cost:String((q*up*1.5).toFixed(0))})) }
+  return (<>
+    <CatManager cats={cats} setCats={setCats} label="Hardware"/>
+    <div className="form-row">
+      <div className="form-group"><label className="form-label">Name *</label><input className="form-input" value={form.name||''} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. Raspberry Pi 4" required/></div>
+      <div className="form-group"><label className="form-label">Category</label>
+        <select className="form-select" value={form.category||cats[0]||'other'} onChange={e=>setForm(f=>({...f,category:e.target.value}))}>
+          {cats.map(c=><option key={c} value={c}>{c.replace('_',' ')}</option>)}
+        </select></div>
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+      <div className="form-group"><label className="form-label">Qty *</label>
+        <input className="form-input" type="number" min="1" value={form.qty||'1'} onChange={e=>qty(parseFloat(e.target.value)||1,parseFloat(form.unit_price)||0)}/></div>
+      <div className="form-group"><label className="form-label">Unit Price (₹) *</label>
+        <input className="form-input" type="number" value={form.unit_price||''} onChange={e=>qty(parseFloat(form.qty)||1,parseFloat(e.target.value)||0)} placeholder="Per unit"/></div>
+      <div className="form-group"><label className="form-label">Auto Total</label>
+        <input className="form-input" value={rupee((parseFloat(form.qty)||1)*(parseFloat(form.unit_price)||0))} readOnly style={{background:'var(--bg-3)',opacity:.8}}/></div>
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+      <div className="form-group"><label className="form-label">Cost to Company (₹)</label><input className="form-input" type="number" value={form.cost_company||''} onChange={e=>setForm(f=>({...f,cost_company:e.target.value}))}/></div>
+      <div className="form-group"><label className="form-label">Cost to Client ×1.3</label><input className="form-input" type="number" value={form.cost_client||''} onChange={e=>setForm(f=>({...f,cost_client:e.target.value}))}/></div>
+      <div className="form-group"><label className="form-label">Proposal ×1.5</label><input className="form-input" type="number" value={form.proposal_cost||''} onChange={e=>setForm(f=>({...f,proposal_cost:e.target.value}))}/></div>
+    </div>
+    <div className="form-row">
+      <div className="form-group"><label className="form-label">Vendor</label><input className="form-input" value={form.vendor||''} onChange={e=>setForm(f=>({...f,vendor:e.target.value}))} placeholder="Supplier"/></div>
+      <div className="form-group"><label className="form-label">Milestone</label>
+        <select className="form-select" value={form.milestone_id||''} onChange={e=>setForm(f=>({...f,milestone_id:e.target.value}))}>
+          <option value="">No milestone</option>{ms.map(m=><option key={m.id} value={m.id}>{m.title}</option>)}
+        </select></div>
+    </div>
+    <div className="form-group"><label className="form-label">Notes</label><textarea className="form-textarea" rows={2} value={form.notes||''} onChange={e=>setForm(f=>({...f,notes:e.target.value}))}/></div>
+  </>)
+}
+
+function SupForm({form,setForm,cats,setCats,ms}) {
+  function auto(co) { const v=parseFloat(co)||0; setForm(f=>({...f,cost_company:co,cost_client:f.cost_client||String((v*1.3).toFixed(0)),proposal_cost:f.proposal_cost||String((v*1.5).toFixed(0))})) }
+  return (<>
+    <CatManager cats={cats} setCats={setCats} label="Support"/>
+    <div className="form-row">
+      <div className="form-group"><label className="form-label">Name *</label><input className="form-input" value={form.name||''} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. Device Logger Fee" required/></div>
+      <div className="form-group"><label className="form-label">Category</label>
+        <select className="form-select" value={form.category||cats[0]||'other'} onChange={e=>setForm(f=>({...f,category:e.target.value}))}>
+          {cats.map(c=><option key={c} value={c}>{c.replace('_',' ')}</option>)}
+        </select></div>
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+      <div className="form-group"><label className="form-label">Cost to Company (₹)</label><input className="form-input" type="number" value={form.cost_company||''} onChange={e=>auto(e.target.value)}/></div>
+      <div className="form-group"><label className="form-label">Cost to Client ×1.3</label><input className="form-input" type="number" value={form.cost_client||''} onChange={e=>setForm(f=>({...f,cost_client:e.target.value}))}/></div>
+      <div className="form-group"><label className="form-label">Proposal ×1.5</label><input className="form-input" type="number" value={form.proposal_cost||''} onChange={e=>setForm(f=>({...f,proposal_cost:e.target.value}))}/></div>
+    </div>
+    <div className="form-row">
+      <div className="form-group"><label className="form-label">Date</label><input className="form-input" type="date" value={form.date||''} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
+      <div className="form-group"><label className="form-label">Milestone</label>
+        <select className="form-select" value={form.milestone_id||''} onChange={e=>setForm(f=>({...f,milestone_id:e.target.value}))}>
+          <option value="">No milestone</option>{ms.map(m=><option key={m.id} value={m.id}>{m.title}</option>)}
+        </select></div>
+    </div>
+    <div className="form-group"><label className="form-label">Notes</label><textarea className="form-textarea" rows={2} value={form.notes||''} onChange={e=>setForm(f=>({...f,notes:e.target.value}))}/></div>
+  </>)
+}
+
+/* ─── Budget Config Panel ──────────────────────────────── */
+function BudgetConfigPanel({detail,kpi,dd}) {
+  const key=`budcfg_${detail?.id}`
+  const [cfg,setCfg]=useState(()=>{ try{return JSON.parse(localStorage.getItem(key)||'null')||{cm:30,pm:50,incExp:true,incHr:true}}catch{return{cm:30,pm:50,incExp:true,incHr:true}} })
+  const [saved,setSaved]=useState(false)
+  if(!dd||!kpi) return null
+  const base=(cfg.incHr?(kpi.hrCost||0):0)+(kpi.swCo||0)+(kpi.hwCo||0)+(kpi.spCo||0)+(cfg.incExp?(kpi.expOk||0):0)
+  const cl=base*(1+(cfg.cm||0)/100), prop=base*(1+(cfg.pm||0)/100)
+  const margin=cl>0?((cl-base)/cl*100).toFixed(1):0
+  function save(){localStorage.setItem(key,JSON.stringify(cfg));setSaved(true);setTimeout(()=>setSaved(false),2500)}
+  return (
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+      <div className="card">
+        <div className="card-header"><span className="card-title">⚙️ Markup Configuration</span></div>
+        <div className="card-body">
+          <div className="form-group">
+            <label className="form-label">Client Markup (%)</label>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <input className="form-input" type="number" min="0" value={cfg.cm} onChange={e=>setCfg(c=>({...c,cm:parseFloat(e.target.value)||0}))} style={{width:100}}/>
+              <span style={{fontSize:11,color:'var(--text-muted)'}}>× {((cfg.cm||0)/100+1).toFixed(2)}</span>
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Proposal Markup (%)</label>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <input className="form-input" type="number" min="0" value={cfg.pm} onChange={e=>setCfg(c=>({...c,pm:parseFloat(e.target.value)||0}))} style={{width:100}}/>
+              <span style={{fontSize:11,color:'var(--text-muted)'}}>× {((cfg.pm||0)/100+1).toFixed(2)}</span>
+            </div>
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:10,marginTop:14}}>
+            {[['incExp','Include approved expenses in base cost'],['incHr','Include hour cost in base cost']].map(([k,l])=>(
+              <label key={k} style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',fontSize:13}}>
+                <input type="checkbox" checked={cfg[k]} onChange={e=>setCfg(c=>({...c,[k]:e.target.checked}))} style={{accentColor:'var(--c1)',width:15,height:15}}/>{l}
+              </label>
+            ))}
+          </div>
+          {saved&&<div className="alert alert-success" style={{marginTop:12}}>✓ Saved!</div>}
+          <button className="btn btn-primary" style={{marginTop:14,width:'100%'}} onClick={save}>Save Configuration</button>
+        </div>
       </div>
-      <div className="form-group"><label className="form-label">End Date</label>
-        <input className="form-input" type="date" value={form.end_date} onChange={e=>setForm(f=>({...f,end_date:e.target.value}))}/></div>
-      <div className="form-group"><label className="form-label">Description</label>
-        <textarea className="form-textarea" value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))} placeholder="Project description and goals…"/></div>
-    </>
+      <div className="card">
+        <div className="card-header"><span className="card-title">📊 Calculated Totals</span></div>
+        <div>
+          {[
+            {l:'Base (Cost to Company)',v:base,c:'#e11d48'},
+            {l:`Cost to Client (+${cfg.cm}%)`,v:cl,c:'#059669'},
+            {l:`Proposal (+${cfg.pm}%)`,v:prop,c:'#7c3aed'},
+            {l:'Gross Profit',v:cl-base,c:'#059669'},
+          ].map((r,i)=>(
+            <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 16px',borderBottom:'1px solid var(--border)',background:i===3?'var(--bg-3)':'transparent'}}>
+              <span style={{fontWeight:i===3?700:500,fontSize:13}}>{r.l}</span>
+              <span style={{fontFamily:'var(--font-mono)',fontWeight:800,fontSize:16,color:r.c}}>{rupee(r.v)}</span>
+            </div>
+          ))}
+          <div style={{padding:'10px 16px',fontSize:12,color:'var(--text-muted)',textAlign:'center'}}>Gross Margin: <strong style={{color:'#059669'}}>{margin}%</strong></div>
+        </div>
+      </div>
+      {/* Full breakdown table */}
+      <div className="card" style={{gridColumn:'1/-1'}}>
+        <div className="card-header"><span className="card-title">📋 Full Cost Breakdown</span></div>
+        <div style={{overflowX:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse'}}>
+            <thead><tr style={{background:'var(--surface-2)'}}>
+              {['Category','Items','Cost to Company','Cost to Client','Proposal','% of Base'].map(h=>(
+                <th key={h} style={{padding:'8px 14px',textAlign:'left',fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--text-muted)',borderBottom:'1px solid var(--border)'}}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {[
+                {cat:'💻 Software',n:dd.sw?.length||0,co:kpi.swCo,cl:kpi.swCl,pr:kpi.swPr},
+                {cat:'🔧 Hardware',n:dd.hw?.length||0,co:kpi.hwCo,cl:kpi.hwCl,pr:kpi.hwPr},
+                {cat:'🛠 Support', n:dd.sup?.length||0,co:kpi.spCo,cl:kpi.spCl,pr:kpi.spPr},
+                {cat:'🧾 Expenses',n:dd.expenses?.filter(e=>e.status==='approved').length||0,co:kpi.expOk,cl:kpi.expOk,pr:kpi.expOk},
+                cfg.incHr&&{cat:'⏱ HR Cost',n:`${Math.round(kpi.totalHrs||0)}h`,co:kpi.hrCost,cl:kpi.hrCost*(1+(cfg.cm||0)/100),pr:kpi.hrCost*(1+(cfg.pm||0)/100)},
+              ].filter(Boolean).map(r=>(
+                <tr key={r.cat} onMouseEnter={e=>e.currentTarget.style.background='var(--bg-3)'} onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                  <td style={{padding:'9px 14px',fontWeight:600}}>{r.cat}</td>
+                  <td style={{padding:'9px 14px',fontFamily:'var(--font-mono)',fontSize:11,color:'var(--text-muted)'}}>{r.n}</td>
+                  <td style={{padding:'9px 14px',fontFamily:'var(--font-mono)',fontWeight:700,color:'#e11d48'}}>{rupee(r.co)}</td>
+                  <td style={{padding:'9px 14px',fontFamily:'var(--font-mono)',fontWeight:700,color:'#059669'}}>{rupee(r.cl)}</td>
+                  <td style={{padding:'9px 14px',fontFamily:'var(--font-mono)',color:'#7c3aed'}}>{rupee(r.pr)}</td>
+                  <td style={{padding:'9px 14px',fontSize:12,color:'var(--text-muted)'}}>{base>0?`${((r.co/base)*100).toFixed(0)}%`:'—'}</td>
+                </tr>
+              ))}
+              <tr style={{background:'var(--bg-3)',borderTop:'2px solid var(--border)'}}>
+                <td colSpan={2} style={{padding:'10px 14px',fontWeight:800,fontSize:13}}>TOTAL</td>
+                <td style={{padding:'10px 14px',fontFamily:'var(--font-mono)',fontWeight:800,color:'#e11d48'}}>{rupee(base)}</td>
+                <td style={{padding:'10px 14px',fontFamily:'var(--font-mono)',fontWeight:800,color:'#059669'}}>{rupee(cl)}</td>
+                <td style={{padding:'10px 14px',fontFamily:'var(--font-mono)',fontWeight:800,color:'#7c3aed'}}>{rupee(prop)}</td>
+                <td style={{padding:'10px 14px',fontSize:12,color:'#059669',fontWeight:700}}>Margin: {margin}%</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   )
+}
+
+/* ══════════════════════════════════════════════════════════
+   MAIN PAGE
+══════════════════════════════════════════════════════════ */
+export default function ProjectsPage() {
+  const { profile } = useAuth()
+  const role    = profile?.role||'employee'
+  const canEdit = ['admin','ceo','manager','finance','department_head'].includes(role)
+
+  const [projects,  setProjects] = useState([])
+  const [loading,   setLoading]  = useState(true)
+  const [search,    setSearch]   = useState('')
+  const [dateRange, setDateRange]= useState({ from:'', to:'' })
+  const [statusFilter, setStatusFilter] = useState('')
+  const [showPM,    setShowPM]   = useState(false)
+  const [editP,     setEditP]    = useState(null)
+  const [pForm,     setPForm]    = useState(iP())
+  const [subP,      setSubP]     = useState(false)
+  const [delP,      setDelP]     = useState(null)
+
+  const [detail,  setDetail]  = useState(null)
+  const [dd,      setDD]      = useState(null)
+  const [ddLoad,  setDDLoad]  = useState(false)
+  const [tab,     setTab]     = useState('overview')
+
+  const [showMS,setShowMS]=useState(false); const [editMS,setEditMS]=useState(null); const [msForm,setMsForm]=useState(iMS()); const [subMS,setSubMS]=useState(false)
+  const [showSW,setShowSW]=useState(false); const [editSW,setEditSW]=useState(null); const [swForm,setSwForm]=useState({})
+  const [showHW,setShowHW]=useState(false); const [editHW,setEditHW]=useState(null); const [hwForm,setHwForm]=useState({})
+  const [showSup,setShowSup]=useState(false); const [editSup,setEditSup]=useState(null); const [supForm,setSupForm]=useState({})
+  const [showRA,setShowRA]=useState(false); const [editRA,setEditRA]=useState(null); const [raForm,setRaForm]=useState({})
+  const [subCost,setSubCost]=useState(false)
+  const [delItem,setDelItem]=useState(null)
+  const [swCats,setSwCats]=useState(SW0)
+  const [hwCats,setHwCats]=useState(HW0)
+  const [supCats,setSupCats]=useState(SUP0)
+
+  useEffect(()=>{ loadList() },[])
+
+  async function loadList() {
+    setLoading(true)
+    const {data}=await supabase.from('projects').select('*').order('created_at',{ascending:false})
+    setProjects(data||[]); setLoading(false)
+  }
+
+  async function openDetail(proj) {
+    setDetail(proj); setDDLoad(true); setDD(null); setTab('overview')
+    try {
+      const [eR,lR,mR,swR,hwR,suR,raR,rtR,emR]=await Promise.all([
+        supabase.from('expense_requests').select('amount,total_amount,status,expense_date,category,requester:profiles!requested_by(full_name)').eq('project_id',proj.id),
+        supabase.from('time_logs').select('hours_worked,work_date,employee:profiles!employee_id(id,full_name)').eq('project_id',proj.id),
+        supabase.from('project_milestones').select('*').eq('project_id',proj.id).order('due_date'),
+        supabase.from('project_software_costs').select('*').eq('project_id',proj.id).order('created_at',{ascending:false}),
+        supabase.from('project_hardware_costs').select('*').eq('project_id',proj.id).order('created_at',{ascending:false}),
+        supabase.from('project_support_costs').select('*').eq('project_id',proj.id).order('created_at',{ascending:false}),
+        supabase.from('project_resource_alloc').select('*,employee:profiles!employee_id(id,full_name,role),milestone:project_milestones(title)').eq('project_id',proj.id),
+        supabase.from('resource_rates').select('*'),
+        supabase.from('profiles').select('id,full_name,role').order('full_name'),
+      ])
+      setDD({ expenses:eR.data||[], timelogs:lR.data||[], milestones:mR.data||[],
+        sw:swR.data||[], hw:hwR.data||[], sup:suR.data||[],
+        ra:raR.data||[], rates:rtR.data||[], employees:emR.data||[] })
+    } catch(e){console.error(e)}
+    setDDLoad(false)
+  }
+
+  async function saveProject(e) {
+    e.preventDefault(); setSubP(true)
+    try {
+      const p={name:pForm.name,description:pForm.description||null,budget:parseFloat(pForm.budget)||0,reserved_budget:parseFloat(pForm.reserved_budget)||0,start_date:pForm.start_date||null,end_date:pForm.end_date||null,status:pForm.status}
+      if(editP){await supabase.from('projects').update(p).eq('id',editP.id);if(detail?.id===editP.id)setDetail(d=>({...d,...p}))}
+      else{await supabase.from('projects').insert({...p,code:'PRJ-'+Date.now().toString().slice(-6),created_by:profile.id})}
+      setShowPM(false); loadList()
+    }catch(e){alert(e.message)}finally{setSubP(false)}
+  }
+
+  async function saveMS(e) {
+    e.preventDefault(); setSubMS(true)
+    try {
+      const p={title:msForm.title,description:msForm.description||null,start_date:msForm.start_date||null,due_date:msForm.due_date||null,actual_start:msForm.actual_start||null,actual_end:msForm.actual_end||null,budget:parseFloat(msForm.budget)||0,status:msForm.status,project_id:detail.id}
+      editMS?await supabase.from('project_milestones').update(p).eq('id',editMS.id):await supabase.from('project_milestones').insert({...p,created_by:profile.id})
+      setShowMS(false); setEditMS(null); setMsForm(iMS()); openDetail(detail)
+    }catch(e){alert(e.message)}finally{setSubMS(false)}
+  }
+
+  async function saveCost(table,payload,editItem,closeFn) {
+    setSubCost(true)
+    try {
+      const p={...payload,project_id:detail.id}
+      editItem?await supabase.from(table).update(p).eq('id',editItem.id):await supabase.from(table).insert({...p,created_by:profile.id})
+      if(closeFn)closeFn(); openDetail(detail)
+    }catch(e){alert(e.message)}finally{setSubCost(false)}
+  }
+
+  async function delCostItem() {
+    if(!delItem)return
+    await supabase.from(delItem.table).delete().eq('id',delItem.id)
+    setDelItem(null); openDetail(detail)
+  }
+
+  const kpi=useMemo(()=>computeKPIs(dd),[dd])
+  const filtered=projects.filter(p=>{
+    if (search && !p.name?.toLowerCase().includes(search.toLowerCase())) return false
+    if (statusFilter && p.status !== statusFilter) return false
+    if (dateRange.from && p.start_date && p.start_date < dateRange.from) return false
+    if (dateRange.to   && p.end_date   && p.end_date   > dateRange.to)   return false
+    return true
+  })
+
+  const MsSel=({val,set})=>(<select className="form-select" value={val||''} onChange={e=>set(e.target.value)}><option value="">No milestone</option>{(dd?.milestones||[]).map(m=><option key={m.id} value={m.id}>{m.title}</option>)}</select>)
+  const EBtn=({onClick})=><button className="btn btn-ghost btn-sm btn-icon" onClick={onClick}><Edit2 size={11}/></button>
+  const DBtn=({t,id})=><button className="btn btn-ghost btn-sm btn-icon" style={{color:'var(--rose)'}} onClick={()=>setDelItem({table:t,id})}><Trash2 size={11}/></button>
+
+  /* ══ DETAIL VIEW ══ */
+  if (detail) {
+    const proj=detail
+    const pct=proj.budget>0?Math.min(100,Math.round(((proj.spent||0)/proj.budget)*100)):0
+    const realSpent=kpi.totalCo||0
+    const realPct=proj.budget>0?Math.min(100,Math.round((realSpent/proj.budget)*100)):0
+    const ms=dd?.milestones||[]
+
+    return (
+      <div>
+        {/* Back bar */}
+        <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:16,flexWrap:'wrap'}}>
+          <button className="btn btn-ghost btn-sm" onClick={()=>setDetail(null)} style={{display:'flex',alignItems:'center',gap:6}}><ArrowLeft size={14}/> Projects</button>
+          <ChevronRight size={13} style={{color:'var(--text-muted)'}}/>
+          <span style={{fontFamily:'var(--font-head)',fontWeight:800,fontSize:16}}>{proj.name}</span>
+          <span style={{fontFamily:'var(--font-mono)',fontSize:10,color:'var(--text-muted)'}}>{proj.code}</span>
+          <Pill s={proj.status} map={SC}/>
+          {canEdit&&<div style={{marginLeft:'auto',display:'flex',gap:8}}>
+            <button className="btn btn-outline btn-sm" onClick={()=>{setEditP(proj);setPForm({name:proj.name,description:proj.description||'',budget:proj.budget||'',start_date:proj.start_date||'',end_date:proj.end_date||'',status:proj.status});setShowPM(true)}}><Edit2 size={12}/> Edit</button>
+            <button className="btn btn-primary btn-sm" onClick={()=>{setEditMS(null);setMsForm(iMS());setShowMS(true)}}><Plus size={12}/> Milestone</button>
+          </div>}
+        </div>
+
+        {/* ── TWO MAIN BUDGET CARDS ── */}
+        {dd&&(
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:16}}>
+            {/* Card 1: Allocated vs Real Spend */}
+            <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:14,padding:'20px',boxShadow:'var(--shadow-sm)'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14}}>
+                <div><div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--text-muted)'}}>ALLOCATED BUDGET</div>
+                  <div style={{fontFamily:'var(--font-mono)',fontWeight:800,fontSize:26,color:'var(--c1)',lineHeight:1.1,marginTop:4}}>{rupee(proj.budget)}</div></div>
+                <div style={{textAlign:'right'}}><div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--text-muted)'}}>TOTAL SPENT</div>
+                  <div style={{fontFamily:'var(--font-mono)',fontWeight:800,fontSize:26,color:realPct>100?'var(--rose)':'var(--amber)',lineHeight:1.1,marginTop:4}}>{rupee(realSpent)}</div></div>
+              </div>
+              {/* Stacked spend bar */}
+              <div style={{height:10,borderRadius:99,background:'var(--bg-3)',overflow:'hidden',display:'flex',marginBottom:8}}>
+                {proj.budget>0&&[{v:kpi.hrCost,c:'#3b82f6'},{v:kpi.swCo,c:'#8b5cf6'},{v:kpi.hwCo,c:'#f59e0b'},{v:kpi.spCo,c:'#14b8a6'},{v:kpi.expOk,c:'#e11d48'}].map((seg,i)=>{
+                  const w=Math.min(100,(seg.v||0)/proj.budget*100)
+                  return w>0?<div key={i} style={{width:`${w}%`,background:seg.c,height:'100%',minWidth:2}} title={rupee(seg.v)}/>:null
+                })}
+              </div>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap',fontSize:10,color:'var(--text-muted)',marginBottom:10}}>
+                {[{c:'#3b82f6',l:'HR',v:kpi.hrCost},{c:'#8b5cf6',l:'SW',v:kpi.swCo},{c:'#f59e0b',l:'HW',v:kpi.hwCo},{c:'#14b8a6',l:'Support',v:kpi.spCo},{c:'#e11d48',l:'Expenses',v:kpi.expOk}].map(s=>(
+                  <span key={s.l} style={{display:'flex',alignItems:'center',gap:3}}>
+                    <span style={{width:7,height:7,borderRadius:2,background:s.c}}/>{s.l}: <strong style={{color:'var(--text)'}}>{rupee(s.v)}</strong>
+                  </span>
+                ))}
+              </div>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:11,fontWeight:600}}>
+                <span style={{color:'var(--text-muted)'}}>Remaining: <span style={{color:realPct>100?'var(--rose)':'var(--emerald)',fontFamily:'var(--font-mono)'}}>{rupee(proj.budget-realSpent)}</span></span>
+                <span style={{color:realPct>100?'var(--rose)':'var(--text-muted)'}}>{realPct}% utilized{realPct>100?' ⚠':''}</span>
+              </div>
+            </div>
+
+            {/* Card 2: Milestone Budget vs Spent */}
+            <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:14,padding:'20px',boxShadow:'var(--shadow-sm)'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14}}>
+                <div><div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--text-muted)'}}>MILESTONE BUDGET</div>
+                  <div style={{fontFamily:'var(--font-mono)',fontWeight:800,fontSize:26,color:'#7c3aed',lineHeight:1.1,marginTop:4}}>{rupee(kpi.msBudget||0)}</div></div>
+                <div style={{textAlign:'right'}}><div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--text-muted)'}}>MILESTONE SPENT</div>
+                  <div style={{fontFamily:'var(--font-mono)',fontWeight:800,fontSize:26,color:'var(--amber)',lineHeight:1.1,marginTop:4}}>{rupee(kpi.msSpent||0)}</div></div>
+              </div>
+              <div className="progress-bar" style={{height:10,marginBottom:12}}>
+                <div className="progress-fill" style={{width:`${kpi.msBudget>0?Math.min(100,((kpi.msSpent||0)/kpi.msBudget)*100):0}%`,background:'#7c3aed'}}/>
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                {(kpi.msByHrs||[]).slice(0,5).map(m=>(
+                  <div key={m.id} style={{display:'flex',alignItems:'center',gap:8,fontSize:11}}>
+                    <span style={{width:6,height:6,borderRadius:'50%',background:'#7c3aed',flexShrink:0}}/>
+                    <span style={{flex:1,color:'var(--text-soft)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.title}</span>
+                    <span style={{fontFamily:'var(--font-mono)',fontWeight:700,color:'var(--c1)'}}>{m.logged.toFixed(1)}h</span>
+                    <span style={{color:'var(--text-muted)'}}>/</span>
+                    <span style={{fontFamily:'var(--font-mono)',color:'var(--text-muted)'}}>{m.allocated}h alloc</span>
+                  </div>
+                ))}
+                {ms.length===0&&<div style={{fontSize:11,color:'var(--text-muted)',fontStyle:'italic'}}>No milestones yet</div>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── 8 KPI STRIP ── */}
+        {dd&&(
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(130px,1fr))',gap:10,marginBottom:16}}>
+            {[
+              {l:'Hours Logged',   v:`${Math.round(kpi.totalHrs||0)}h`,c:'#3b82f6'},
+              {l:'Hour Cost',      v:rupee(kpi.hrCost||0),             c:'#8b5cf6'},
+              {l:'Total Expense',  v:rupee(kpi.expOk||0),              c:'#e11d48'},
+              {l:'Cost to Company',v:rupee(kpi.totalCo||0),            c:'var(--rose)'},
+              {l:'Cost to Client', v:rupee(kpi.totalCl||0),            c:'var(--emerald)'},
+              {l:'HW Spent',       v:rupee(kpi.hwCo||0),               c:'#f59e0b'},
+              {l:'SW Spent',       v:rupee(kpi.swCo||0),               c:'#7c3aed'},
+              {l:'Support Spent',  v:rupee(kpi.spCo||0),               c:'#14b8a6'},
+              {l:'Total HW Cost',   v:rupee(kpi.totalHWCo||0),            c:'#f59e0b'},
+              {l:'Total SW Cost',   v:rupee(kpi.totalSWCo||0),            c:'#7c3aed'},
+              {l:'Available Budget',v:rupee(Math.max(0,(detail?.budget||0)-(detail?.reserved_budget||0)-(kpi.totalCo||0))), c:'var(--emerald)'},
+            ].map(s=>(
+              <div key={s.l} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,borderTop:`3px solid ${s.c}`,padding:'10px 12px',boxShadow:'var(--shadow-sm)'}}>
+                <div style={{fontFamily:'var(--font-mono)',fontWeight:800,fontSize:16,color:s.c,lineHeight:1,marginBottom:4}}>{s.v}</div>
+                <div style={{fontSize:9,color:'var(--text-muted)',fontWeight:700,textTransform:'uppercase',letterSpacing:'.05em'}}>{s.l}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── PILL TABS ── */}
+        <div style={{display:'flex',gap:6,marginBottom:18,flexWrap:'wrap'}}>
+          {[
+            {id:'overview',  e:'📊',l:'Overview'},
+            {id:'milestones',e:'🏁',l:`Milestones (${ms.length})`},
+            {id:'resources', e:'👥',l:`Resources (${dd?.ra?.length||0})`},
+            {id:'software',  e:'💻',l:`Software (${dd?.sw?.length||0})`},
+            {id:'hardware',  e:'🔧',l:`Hardware (${dd?.hw?.length||0})`},
+            {id:'support',   e:'🛠',l:`Support (${dd?.sup?.length||0})`},
+            {id:'expenses',  e:'🧾',l:`Expenses (${dd?.expenses?.length||0})`},
+            {id:'budget',    e:'⚙️',l:'Budget Config'},
+          ].map(t=>{
+            const active=tab===t.id
+            return <button key={t.id} onClick={()=>setTab(t.id)}
+              style={{display:'flex',alignItems:'center',gap:5,padding:'7px 13px',borderRadius:8,
+                border:`1.5px solid ${active?'var(--c1)':'var(--border)'}`,cursor:'pointer',
+                fontFamily:'inherit',fontWeight:active?700:500,fontSize:12,
+                background:active?'var(--c1)':'var(--surface)',
+                color:active?'#fff':'var(--text-soft)',transition:'all .15s',whiteSpace:'nowrap'}}>
+              <span>{t.e}</span>{t.l}
+            </button>
+          })}
+        </div>
+
+        {ddLoad&&<div style={{display:'flex',justifyContent:'center',padding:50}}><div className="spinner"/></div>}
+
+        {/* ── OVERVIEW ── */}
+        {!ddLoad&&tab==='overview'&&dd&&(
+          <div style={{display:'flex',flexDirection:'column',gap:14}}>
+            <div className="card">
+              <div className="card-header"><span className="card-title">📈 Monthly Cost Trend</span></div>
+              <div className="card-body">
+                {(kpi.expByMonth||[]).every(d=>d.expenses===0&&d.hrCost===0)
+                  ?<div style={{textAlign:'center',padding:'30px 0',color:'var(--text-muted)',fontSize:12}}>No cost data yet</div>
+                  :<ResponsiveContainer width="100%" height={220}>
+                    <BarChart data={kpi.expByMonth} barSize={10} barGap={2}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false}/>
+                      <XAxis dataKey="month" tick={{fontSize:10,fill:'var(--text-muted)'}} axisLine={false} tickLine={false}/>
+                      <YAxis tick={{fontSize:10,fill:'var(--text-muted)'}} tickFormatter={v=>`₹${(v/1000).toFixed(0)}K`} axisLine={false} tickLine={false}/>
+                      <Tooltip formatter={v=>[rupee(v)]} contentStyle={{borderRadius:8,fontSize:12,background:'var(--surface)',border:'1px solid var(--border)'}}/>
+                      <Legend iconSize={8} wrapperStyle={{fontSize:11}}/>
+                      <Bar dataKey="expenses" name="Expenses" fill="#e11d48" radius={[3,3,0,0]}/>
+                      <Bar dataKey="hrCost"   name="Hour Cost" fill="#3b82f6" radius={[3,3,0,0]}/>
+                    </BarChart>
+                  </ResponsiveContainer>
+                }
+              </div>
+            </div>
+            <div className="card">
+              <div className="card-header"><span className="card-title">💰 Cost Summary</span></div>
+              <div style={{overflowX:'auto'}}>
+                <table style={{width:'100%',borderCollapse:'collapse',minWidth:480}}>
+                  <thead><tr style={{background:'var(--surface-2)'}}>
+                    <TH c="Category"/> <TH c="Items"/> <TH c="Cost (Company)"/> <TH c="Cost (Client)"/> <TH c="Proposal"/>
+                  </tr></thead>
+                  <tbody>
+                    {[
+                      {cat:'⏱ HR Cost',  n:`${Math.round(kpi.totalHrs||0)}h`,co:kpi.hrCost,cl:kpi.hrCost,pr:kpi.hrCost},
+                      {cat:'💻 Software', n:dd.sw?.length||0,                 co:kpi.swCo,cl:kpi.swCl,pr:kpi.swPr},
+                      {cat:'🔧 Hardware', n:dd.hw?.length||0,                 co:kpi.hwCo,cl:kpi.hwCl,pr:kpi.hwPr},
+                      {cat:'🛠 Support',  n:dd.sup?.length||0,                co:kpi.spCo,cl:kpi.spCl,pr:kpi.spPr},
+                      {cat:'🧾 Expenses', n:dd.expenses?.filter(e=>e.status==='approved').length||0,co:kpi.expOk,cl:kpi.expOk,pr:kpi.expOk},
+                    ].map((r,i)=>(
+                      <tr key={i} onMouseEnter={e=>e.currentTarget.style.background='var(--bg-3)'} onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                        <TD c={<span style={{fontWeight:600}}>{r.cat}</span>}/>
+                        <TD c={<span style={{color:'var(--text-muted)',fontFamily:'var(--font-mono)',fontSize:11}}>{r.n}</span>}/>
+                        <MTD v={r.co} color="#e11d48"/> <MTD v={r.cl} color="#059669"/> <MTD v={r.pr} color="#7c3aed"/>
+                      </tr>
+                    ))}
+                    <tr style={{background:'var(--bg-3)',fontWeight:800,borderTop:'2px solid var(--border)'}}>
+                      <td colSpan={2} style={{padding:'10px 14px',fontSize:13,fontWeight:800}}>TOTAL</td>
+                      <td style={{padding:'10px 14px',fontFamily:'var(--font-mono)',fontWeight:800,color:'#e11d48'}}>{rupee(kpi.totalCo)}</td>
+                      <td style={{padding:'10px 14px',fontFamily:'var(--font-mono)',fontWeight:800,color:'#059669'}}>{rupee(kpi.totalCl)}</td>
+                      <td style={{padding:'10px 14px',fontFamily:'var(--font-mono)',fontWeight:800,color:'#7c3aed'}}>{rupee(kpi.totalPr)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── MILESTONES ── */}
+        {!ddLoad&&tab==='milestones'&&(
+          <div>
+            <div style={{display:'flex',justifyContent:'flex-end',marginBottom:12}}>
+              {canEdit&&<button className="btn btn-primary btn-sm" onClick={()=>{setEditMS(null);setMsForm(iMS());setShowMS(true)}}><Plus size={12}/> Add Milestone</button>}
+            </div>
+            {ms.length===0?<div style={{textAlign:'center',color:'var(--text-muted)',padding:'50px 0',fontSize:13}}>No milestones — add one above</div>
+              :ms.map(m=>{
+                const mc=MSC[m.status]||'#94a3b8'
+                const mh=(kpi.msByHrs||[]).find(x=>x.id===m.id)
+                return (
+                  <div key={m.id} style={{background:'var(--surface)',border:`1px solid ${mc}25`,borderLeft:`4px solid ${mc}`,borderRadius:10,padding:'14px 18px',marginBottom:10}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,flexWrap:'wrap'}}>
+                      <div style={{flex:1}}>
+                        <div style={{fontWeight:700,fontSize:14,marginBottom:6}}>{m.title}</div>
+                        {m.description&&<div style={{fontSize:12,color:'var(--text-muted)',marginBottom:8}}>{m.description}</div>}
+                        <div style={{display:'flex',gap:16,fontSize:11,color:'var(--text-muted)',flexWrap:'wrap'}}>
+                          {(m.start_date||m.due_date)&&<span>📅 {dateFmt(m.start_date)||'—'} → {dateFmt(m.due_date)||'—'}</span>}
+                          {m.actual_start&&<span style={{color:'var(--emerald)'}}>✓ {dateFmt(m.actual_start)}{m.actual_end?` → ${dateFmt(m.actual_end)}`:''}</span>}
+                          {m.budget>0&&<span style={{color:'var(--c1)',fontFamily:'var(--font-mono)',fontWeight:700}}>{rupee(m.budget)}</span>}
+                          {mh&&<span style={{color:'#3b82f6',fontWeight:700,fontFamily:'var(--font-mono)'}}>{mh.logged.toFixed(1)}h logged / {mh.allocated}h alloc</span>}
+                        </div>
+                      </div>
+                      <div style={{display:'flex',alignItems:'center',gap:8,flexShrink:0}}>
+                        <Pill s={m.status} map={MSC}/>
+                        {canEdit&&<><EBtn onClick={()=>{setEditMS(m);setMsForm({title:m.title,description:m.description||'',start_date:m.start_date||'',due_date:m.due_date||'',actual_start:m.actual_start||'',actual_end:m.actual_end||'',budget:m.budget||'',status:m.status||'pending'});setShowMS(true)}}/><DBtn t="project_milestones" id={m.id}/></>}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })
+            }
+          </div>
+        )}
+
+        {/* ── RESOURCES ── */}
+        {!ddLoad&&tab==='resources'&&(
+          <div>
+            <div style={{display:'flex',justifyContent:'flex-end',marginBottom:12}}>
+              {canEdit&&<button className="btn btn-primary btn-sm" onClick={()=>{setEditRA(null);setRaForm({employee_id:'',milestone_id:'',allocated_hours:'',idle_hours:'',month:new Date().getMonth()+1,year:new Date().getFullYear(),notes:''});setShowRA(true)}}><Plus size={12}/> Allocate</button>}
+            </div>
+            <div className="table-wrap"><table>
+              <thead><tr><TH c="Employee"/><TH c="Milestone"/><TH c="Allocated Hrs"/><TH c="Idle Hrs"/><TH c="Est. Cost"/><TH c="Month"/>{canEdit&&<TH c=""/>}</tr></thead>
+              <tbody>
+                {(dd?.ra||[]).length===0?<tr><td colSpan={7} style={{padding:'30px',textAlign:'center',color:'var(--text-muted)',fontSize:12}}>No allocations yet</td></tr>
+                  :(dd?.ra||[]).map(r=>{
+                    const rt=(dd?.rates||[]).find(x=>x.employee_id===r.employee_id)
+                    const hr=rt?rt.hourly_rate||rt.monthly_salary/(22*8):0
+                    return <tr key={r.id}>
+                      <TD c={<div><div style={{fontWeight:600}}>{r.employee?.full_name||'—'}</div><div style={{fontSize:10,color:'var(--text-muted)',textTransform:'capitalize'}}>{r.employee?.role}</div></div>}/>
+                      <TD c={<span style={{fontSize:11,color:'var(--text-muted)'}}>{r.milestone?.title||'—'}</span>}/>
+                      <TD c={<span style={{fontFamily:'var(--font-mono)',fontWeight:700,color:'var(--c1)'}}>{r.allocated_hours}h</span>}/>
+                      <TD c={<span style={{fontFamily:'var(--font-mono)',color:'var(--amber)'}}>{r.idle_hours||0}h</span>}/>
+                      <TD c={<span style={{fontFamily:'var(--font-mono)',fontWeight:700,color:'#e11d48'}}>{rupee((r.allocated_hours||0)*hr)}</span>}/>
+                      <TD c={<span style={{fontSize:11,color:'var(--text-muted)'}}>{r.month?MOS[r.month-1]:''} {r.year||''}</span>}/>
+                      {canEdit&&<TD c={<div style={{display:'flex',gap:4}}><EBtn onClick={()=>{setEditRA(r);setRaForm({employee_id:r.employee_id,milestone_id:r.milestone_id||'',allocated_hours:r.allocated_hours||'',idle_hours:r.idle_hours||'',month:r.month||new Date().getMonth()+1,year:r.year||new Date().getFullYear(),notes:r.notes||''});setShowRA(true)}}/><DBtn t="project_resource_alloc" id={r.id}/></div>}/>}
+                    </tr>
+                  })
+                }
+              </tbody>
+            </table></div>
+          </div>
+        )}
+
+        {/* ── SOFTWARE ── */}
+        {!ddLoad&&tab==='software'&&(
+          <div>
+            <div style={{display:'flex',gap:10,justifyContent:'space-between',marginBottom:12,flexWrap:'wrap',alignItems:'center'}}>
+              <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                <SumCard label="Cost (Company)" value={rupee(kpi.swCo||0)} color="#e11d48"/>
+                <SumCard label="Cost (Client)"  value={rupee(kpi.swCl||0)} color="#059669"/>
+                <SumCard label="Proposal"       value={rupee(kpi.swPr||0)} color="#7c3aed"/>
+              </div>
+              {canEdit&&<button className="btn btn-primary btn-sm" onClick={()=>{setEditSW(null);setSwForm({name:'',category:swCats[0],qty:1,unit_price:'',cost_company:'',cost_client:'',proposal_cost:'',billing_cycle:'monthly',notes:'',milestone_id:''});setShowSW(true)}}><Plus size={12}/> Add SW</button>}
+            </div>
+            <div className="table-wrap"><table>
+              <thead><tr><TH c="Name"/><TH c="Cat"/><TH c="Qty"/><TH c="Unit ₹"/><TH c="Cost (Co.)"/><TH c="Cost (Client)"/><TH c="Proposal"/><TH c="Billing"/><TH c="Milestone"/>{canEdit&&<TH c=""/>}</tr></thead>
+              <tbody>
+                {(dd?.sw||[]).length===0?<tr><td colSpan={10} style={{padding:'30px',textAlign:'center',color:'var(--text-muted)',fontSize:12}}>No software costs</td></tr>
+                  :(dd?.sw||[]).map(r=><tr key={r.id}>
+                    <TD c={<span style={{fontWeight:600}}>{r.name}</span>}/>
+                    <TD c={<span className="badge badge-info" style={{fontSize:10}}>{r.category}</span>}/>
+                    <TD c={<span style={{fontFamily:'var(--font-mono)'}}>{r.qty||1}</span>}/>
+                    <TD c={<span style={{fontFamily:'var(--font-mono)'}}>{rupee(r.unit_price||0)}</span>}/>
+                    <MTD v={r.cost_company} color="#e11d48"/> <MTD v={r.cost_client} color="#059669"/> <MTD v={r.proposal_cost} color="#7c3aed"/>
+                    <TD c={<span style={{fontSize:11,color:'var(--text-muted)',textTransform:'capitalize'}}>{r.billing_cycle?.replace('_',' ')}</span>}/>
+                    <TD c={<span style={{fontSize:11,color:'var(--text-muted)'}}>{ms.find(m=>m.id===r.milestone_id)?.title||'—'}</span>}/>
+                    {canEdit&&<TD c={<div style={{display:'flex',gap:4}}><EBtn onClick={()=>{setEditSW(r);setSwForm({name:r.name,category:r.category,qty:r.qty||1,unit_price:r.unit_price||'',cost_company:r.cost_company||'',cost_client:r.cost_client||'',proposal_cost:r.proposal_cost||'',billing_cycle:r.billing_cycle||'monthly',notes:r.notes||'',milestone_id:r.milestone_id||''});setShowSW(true)}}/><DBtn t="project_software_costs" id={r.id}/></div>}/>}
+                  </tr>)
+                }
+              </tbody>
+            </table></div>
+          </div>
+        )}
+
+        {/* ── HARDWARE ── */}
+        {!ddLoad&&tab==='hardware'&&(
+          <div>
+            <div style={{display:'flex',gap:10,justifyContent:'space-between',marginBottom:12,flexWrap:'wrap',alignItems:'center'}}>
+              <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                <SumCard label="Cost (Company)" value={rupee(kpi.hwCo||0)} color="#e11d48"/>
+                <SumCard label="Cost (Client)"  value={rupee(kpi.hwCl||0)} color="#059669"/>
+                <SumCard label="Proposal"       value={rupee(kpi.hwPr||0)} color="#7c3aed"/>
+              </div>
+              {canEdit&&<button className="btn btn-primary btn-sm" onClick={()=>{setEditHW(null);setHwForm({name:'',category:hwCats[0],qty:'1',unit_price:'',cost_company:'',cost_client:'',proposal_cost:'',vendor:'',notes:'',milestone_id:''});setShowHW(true)}}><Plus size={12}/> Add HW</button>}
+            </div>
+            <div className="table-wrap"><table>
+              <thead><tr><TH c="Name"/><TH c="Type"/><TH c="Qty"/><TH c="Unit ₹"/><TH c="Total"/><TH c="Cost (Co.)"/><TH c="Cost (Client)"/><TH c="Proposal"/><TH c="Vendor"/>{canEdit&&<TH c=""/>}</tr></thead>
+              <tbody>
+                {(dd?.hw||[]).length===0?<tr><td colSpan={10} style={{padding:'30px',textAlign:'center',color:'var(--text-muted)',fontSize:12}}>No hardware costs</td></tr>
+                  :(dd?.hw||[]).map(r=><tr key={r.id}>
+                    <TD c={<span style={{fontWeight:600}}>{r.name}</span>}/>
+                    <TD c={<span className="badge badge-warning" style={{fontSize:10}}>{r.category}</span>}/>
+                    <TD c={<span style={{fontFamily:'var(--font-mono)'}}>{r.qty}</span>}/>
+                    <MTD v={r.unit_price}/> <MTD v={r.total_price} color="var(--amber)"/>
+                    <MTD v={r.cost_company} color="#e11d48"/> <MTD v={r.cost_client} color="#059669"/> <MTD v={r.proposal_cost} color="#7c3aed"/>
+                    <TD c={<span style={{fontSize:11,color:'var(--text-muted)'}}>{r.vendor||'—'}</span>}/>
+                    {canEdit&&<TD c={<div style={{display:'flex',gap:4}}><EBtn onClick={()=>{setEditHW(r);setHwForm({name:r.name,category:r.category,qty:r.qty||'1',unit_price:r.unit_price||'',cost_company:r.cost_company||'',cost_client:r.cost_client||'',proposal_cost:r.proposal_cost||'',vendor:r.vendor||'',notes:r.notes||'',milestone_id:r.milestone_id||''});setShowHW(true)}}/><DBtn t="project_hardware_costs" id={r.id}/></div>}/>}
+                  </tr>)
+                }
+              </tbody>
+            </table></div>
+          </div>
+        )}
+
+        {/* ── SUPPORT ── */}
+        {!ddLoad&&tab==='support'&&(
+          <div>
+            <div style={{display:'flex',gap:10,justifyContent:'space-between',marginBottom:12,flexWrap:'wrap',alignItems:'center'}}>
+              <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                <SumCard label="Cost (Company)" value={rupee(kpi.spCo||0)} color="#e11d48"/>
+                <SumCard label="Cost (Client)"  value={rupee(kpi.spCl||0)} color="#059669"/>
+                <SumCard label="Proposal"       value={rupee(kpi.spPr||0)} color="#7c3aed"/>
+              </div>
+              {canEdit&&<button className="btn btn-primary btn-sm" onClick={()=>{setEditSup(null);setSupForm({name:'',category:supCats[0],cost_company:'',cost_client:'',proposal_cost:'',date:'',notes:'',milestone_id:''});setShowSup(true)}}><Plus size={12}/> Add Support</button>}
+            </div>
+            <div className="table-wrap"><table>
+              <thead><tr><TH c="Name"/><TH c="Category"/><TH c="Cost (Co.)"/><TH c="Cost (Client)"/><TH c="Proposal"/><TH c="Date"/><TH c="Milestone"/>{canEdit&&<TH c=""/>}</tr></thead>
+              <tbody>
+                {(dd?.sup||[]).length===0?<tr><td colSpan={8} style={{padding:'30px',textAlign:'center',color:'var(--text-muted)',fontSize:12}}>No support costs</td></tr>
+                  :(dd?.sup||[]).map(r=><tr key={r.id}>
+                    <TD c={<span style={{fontWeight:600}}>{r.name}</span>}/>
+                    <TD c={<span className="badge badge-teal" style={{fontSize:10}}>{r.category?.replace('_',' ')}</span>}/>
+                    <MTD v={r.cost_company} color="#e11d48"/> <MTD v={r.cost_client} color="#059669"/> <MTD v={r.proposal_cost} color="#7c3aed"/>
+                    <TD c={<span style={{fontSize:11,color:'var(--text-muted)'}}>{dateFmt(r.date)}</span>}/>
+                    <TD c={<span style={{fontSize:11,color:'var(--text-muted)'}}>{ms.find(m=>m.id===r.milestone_id)?.title||'—'}</span>}/>
+                    {canEdit&&<TD c={<div style={{display:'flex',gap:4}}><EBtn onClick={()=>{setEditSup(r);setSupForm({name:r.name,category:r.category,cost_company:r.cost_company||'',cost_client:r.cost_client||'',proposal_cost:r.proposal_cost||'',date:r.date||'',notes:r.notes||'',milestone_id:r.milestone_id||''});setShowSup(true)}}/><DBtn t="project_support_costs" id={r.id}/></div>}/>}
+                  </tr>)
+                }
+              </tbody>
+            </table></div>
+          </div>
+        )}
+
+        {/* ── EXPENSES ── */}
+        {!ddLoad&&tab==='expenses'&&(
+          <div className="table-wrap"><table>
+            <thead><tr><TH c="Requester"/><TH c="Category"/><TH c="Amount"/><TH c="Status"/><TH c="Date"/></tr></thead>
+            <tbody>
+              {(dd?.expenses||[]).length===0?<tr><td colSpan={5} style={{padding:'30px',textAlign:'center',color:'var(--text-muted)',fontSize:12}}>No expenses linked</td></tr>
+                :(dd?.expenses||[]).map((e,i)=><tr key={i}>
+                  <TD c={<span style={{fontWeight:600}}>{e.requester?.full_name||'—'}</span>}/>
+                  <TD c={<span className="badge badge-info">{e.category}</span>}/>
+                  <MTD v={e.total_amount||e.amount} color="var(--c1)"/>
+                  <TD c={<span style={{padding:'2px 8px',borderRadius:4,fontSize:10,fontWeight:700,textTransform:'uppercase',background:e.status==='approved'?'#dcfce7':e.status==='rejected'?'#fee2e2':'#fef3c7',color:e.status==='approved'?'#15803d':e.status==='rejected'?'#b91c1c':'#92400e'}}>{e.status}</span>}/>
+                  <TD c={<span style={{fontSize:12,color:'var(--text-muted)'}}>{dateFmt(e.expense_date)}</span>}/>
+                </tr>)
+              }
+            </tbody>
+          </table></div>
+        )}
+
+        {/* ── BUDGET CONFIG ── */}
+        {!ddLoad&&tab==='budget'&&<BudgetConfigPanel detail={detail} kpi={kpi} dd={dd}/>}
+
+        {/* ══ MODALS ══ */}
+        {/* Milestone */}
+        <Modal open={showMS} onClose={()=>setShowMS(false)} title={editMS?'Edit Milestone':'Add Milestone'} size="lg"
+          footer={<><button className="btn btn-ghost" onClick={()=>setShowMS(false)}>Cancel</button><button className="btn btn-primary" onClick={saveMS} disabled={subMS}>{subMS?'Saving…':'Save'}</button></>}>
+          <div className="form-group"><label className="form-label">Title *</label><input className="form-input" value={msForm.title} onChange={e=>setMsForm(f=>({...f,title:e.target.value}))} required/></div>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Planned Start</label><input className="form-input" type="date" value={msForm.start_date} onChange={e=>setMsForm(f=>({...f,start_date:e.target.value}))}/></div>
+            <div className="form-group"><label className="form-label">Planned End</label><input className="form-input" type="date" value={msForm.due_date} onChange={e=>setMsForm(f=>({...f,due_date:e.target.value}))}/></div>
+          </div>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Actual Start</label><input className="form-input" type="date" value={msForm.actual_start} onChange={e=>setMsForm(f=>({...f,actual_start:e.target.value}))}/></div>
+            <div className="form-group"><label className="form-label">Actual End</label><input className="form-input" type="date" value={msForm.actual_end} onChange={e=>setMsForm(f=>({...f,actual_end:e.target.value}))}/></div>
+          </div>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Budget (₹)</label><input className="form-input" type="number" value={msForm.budget} onChange={e=>setMsForm(f=>({...f,budget:e.target.value}))}/></div>
+            <div className="form-group"><label className="form-label">Status</label>
+              <select className="form-select" value={msForm.status} onChange={e=>setMsForm(f=>({...f,status:e.target.value}))}>
+                {['pending','in_progress','completed','delayed'].map(s=><option key={s} value={s}>{s.replace('_',' ')}</option>)}
+              </select></div>
+          </div>
+          <div className="form-group"><label className="form-label">Description</label><textarea className="form-textarea" value={msForm.description} onChange={e=>setMsForm(f=>({...f,description:e.target.value}))}/></div>
+        </Modal>
+
+        {/* SW */}
+        <Modal open={showSW} onClose={()=>setShowSW(false)} title={editSW?'Edit Software Cost':'Add Software Cost'} size="lg"
+          footer={<><button className="btn btn-ghost" onClick={()=>setShowSW(false)}>Cancel</button><button className="btn btn-primary" onClick={()=>saveCost('project_software_costs',{name:swForm.name,category:swForm.category,qty:parseFloat(swForm.qty)||1,unit_price:parseFloat(swForm.unit_price)||0,cost_company:parseFloat(swForm.cost_company)||0,cost_client:parseFloat(swForm.cost_client)||0,proposal_cost:parseFloat(swForm.proposal_cost)||0,billing_cycle:swForm.billing_cycle||'monthly',notes:swForm.notes||null,milestone_id:swForm.milestone_id||null},editSW,()=>{setShowSW(false);setEditSW(null)})} disabled={subCost}>{subCost?'Saving…':'Save'}</button></>}>
+          <SWForm form={swForm} setForm={setSwForm} cats={swCats} setCats={setSwCats} ms={dd?.milestones||[]}/>
+        </Modal>
+
+        {/* HW */}
+        <Modal open={showHW} onClose={()=>setShowHW(false)} title={editHW?'Edit Hardware Cost':'Add Hardware Cost'} size="lg"
+          footer={<><button className="btn btn-ghost" onClick={()=>setShowHW(false)}>Cancel</button><button className="btn btn-primary" onClick={()=>{const q=parseFloat(hwForm.qty)||1,up=parseFloat(hwForm.unit_price)||0,co=parseFloat(hwForm.cost_company)||(q*up);saveCost('project_hardware_costs',{name:hwForm.name,category:hwForm.category,qty:q,unit_price:up,total_price:q*up,cost_company:co,cost_client:parseFloat(hwForm.cost_client)||(co*1.3),proposal_cost:parseFloat(hwForm.proposal_cost)||(co*1.5),vendor:hwForm.vendor||null,notes:hwForm.notes||null,milestone_id:hwForm.milestone_id||null},editHW,()=>{setShowHW(false);setEditHW(null)})}} disabled={subCost}>{subCost?'Saving…':'Save'}</button></>}>
+          <HWForm form={hwForm} setForm={setHwForm} cats={hwCats} setCats={setHwCats} ms={dd?.milestones||[]}/>
+        </Modal>
+
+        {/* Support */}
+        <Modal open={showSup} onClose={()=>setShowSup(false)} title={editSup?'Edit Support Cost':'Add Support Cost'} size="lg"
+          footer={<><button className="btn btn-ghost" onClick={()=>setShowSup(false)}>Cancel</button><button className="btn btn-primary" onClick={()=>saveCost('project_support_costs',{name:supForm.name,category:supForm.category,cost_company:parseFloat(supForm.cost_company)||0,cost_client:parseFloat(supForm.cost_client)||0,proposal_cost:parseFloat(supForm.proposal_cost)||0,date:supForm.date||null,notes:supForm.notes||null,milestone_id:supForm.milestone_id||null},editSup,()=>{setShowSup(false);setEditSup(null)})} disabled={subCost}>{subCost?'Saving…':'Save'}</button></>}>
+          <SupForm form={supForm} setForm={setSupForm} cats={supCats} setCats={setSupCats} ms={dd?.milestones||[]}/>
+        </Modal>
+
+        {/* Resource Alloc */}
+        <Modal open={showRA} onClose={()=>setShowRA(false)} title={editRA?'Edit Allocation':'Allocate Resource'} size="lg"
+          footer={<><button className="btn btn-ghost" onClick={()=>setShowRA(false)}>Cancel</button><button className="btn btn-primary" onClick={()=>saveCost('project_resource_alloc',{employee_id:raForm.employee_id,milestone_id:raForm.milestone_id||null,allocated_hours:parseFloat(raForm.allocated_hours)||0,idle_hours:parseFloat(raForm.idle_hours)||0,month:parseInt(raForm.month)||null,year:parseInt(raForm.year)||new Date().getFullYear(),notes:raForm.notes||null},editRA,()=>{setShowRA(false);setEditRA(null)})} disabled={subCost}>{subCost?'Saving…':'Save'}</button></>}>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Employee *</label>
+              <select className="form-select" value={raForm.employee_id||''} onChange={e=>setRaForm(f=>({...f,employee_id:e.target.value}))} required>
+                <option value="">Select…</option>
+                {(dd?.employees||[]).map(u=><option key={u.id} value={u.id}>{u.full_name} ({u.role})</option>)}
+              </select></div>
+            <div className="form-group"><label className="form-label">Milestone</label><MsSel val={raForm.milestone_id} set={v=>setRaForm(f=>({...f,milestone_id:v}))}/></div>
+          </div>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Allocated Hours *</label><input className="form-input" type="number" step="0.5" value={raForm.allocated_hours||''} onChange={e=>setRaForm(f=>({...f,allocated_hours:e.target.value}))} required/></div>
+            <div className="form-group"><label className="form-label">Idle Hours</label><input className="form-input" type="number" step="0.5" value={raForm.idle_hours||''} onChange={e=>setRaForm(f=>({...f,idle_hours:e.target.value}))}/></div>
+          </div>
+          {raForm.employee_id&&raForm.allocated_hours&&(()=>{
+            const rt=(dd?.rates||[]).find(r=>r.employee_id===raForm.employee_id)
+            if(!rt)return<div className="alert alert-warning" style={{marginBottom:8}}>⚠ No rate configured for this employee</div>
+            const hr=rt.hourly_rate||rt.monthly_salary/(22*8)
+            return<div style={{padding:'8px 12px',borderRadius:8,background:'var(--c1-soft)',fontSize:12,fontWeight:600,color:'var(--c1)',marginBottom:8}}>💰 Est. cost: {rupee(Math.round(parseFloat(raForm.allocated_hours)*hr))} @ ₹{hr.toFixed(0)}/hr</div>
+          })()}
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Month</label>
+              <select className="form-select" value={raForm.month||new Date().getMonth()+1} onChange={e=>setRaForm(f=>({...f,month:e.target.value}))}>
+                {MOS.map((m,i)=><option key={i+1} value={i+1}>{m}</option>)}
+              </select></div>
+            <div className="form-group"><label className="form-label">Year</label><input className="form-input" type="number" value={raForm.year||new Date().getFullYear()} onChange={e=>setRaForm(f=>({...f,year:e.target.value}))}/></div>
+          </div>
+          <div className="form-group"><label className="form-label">Notes</label><textarea className="form-textarea" rows={2} value={raForm.notes||''} onChange={e=>setRaForm(f=>({...f,notes:e.target.value}))}/></div>
+        </Modal>
+
+        {/* Project edit */}
+        <Modal open={showPM} onClose={()=>setShowPM(false)} title={editP?'Edit Project':'New Project'}
+          footer={<><button className="btn btn-ghost" onClick={()=>setShowPM(false)}>Cancel</button><button className="btn btn-primary" onClick={saveProject} disabled={subP}>{subP?'Saving…':editP?'Update':'Create'}</button></>}>
+          <ProjForm form={pForm} setForm={setPForm}/>
+        </Modal>
+        <Confirm open={!!delItem} message="Delete this item?" danger onConfirm={delCostItem} onCancel={()=>setDelItem(null)}/>
+      </div>
+    )
+  }
+
+  /* ══ LIST VIEW ══ */
+  if (loading) return <Loader/>
+  return (
+    <div>
+      <div className="page-header">
+        <div><div className="page-title">Project Management</div><div className="page-subtitle">Full cost visibility per project</div></div>
+        {canEdit&&<button className="btn btn-primary" onClick={()=>{setEditP(null);setPForm(iP());setShowPM(true)}}><Plus size={14}/> New Project</button>}
+      </div>
+      {/* ── Stats strip ── */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))',gap:10,marginBottom:20}}>
+        {[
+          {l:'Total Projects',   v:filtered.length,                                                       c:'var(--c1)',   sub:`${projects.length} total`},
+          {l:'Active',          v:projects.filter(p=>p.status==='active').length,                         c:'var(--emerald)',sub:'currently running'},
+          {l:'Total Budget',    v:rupee(filtered.reduce((s,p)=>s+(p.budget||0),0)),                       c:'var(--sky)',  sub:'allocated'},
+          {l:'Total Spent',     v:rupee(filtered.reduce((s,p)=>s+(p.spent||0),0)),                        c:'var(--amber)',sub:'across all projects'},
+          {l:'Remaining',       v:rupee(filtered.reduce((s,p)=>s+(p.budget||0)-(p.spent||0),0)),          c:'var(--violet)',sub:'available'},
+          {l:'On Hold',         v:projects.filter(p=>p.status==='on_hold').length,                        c:'#f59e0b',    sub:'paused'},
+          {l:'Completed',       v:projects.filter(p=>p.status==='completed').length,                      c:'#3b82f6',    sub:'finished'},
+          {l:'Over Budget',     v:projects.filter(p=>p.budget>0&&(p.spent||0)>p.budget).length,           c:'var(--rose)', sub:'exceeded'},
+        ].map(s=>(
+          <div key={s.l} className="stat-card" style={{borderTopColor:s.c}}>
+            <div className="stat-value" style={{color:s.c,fontSize:22}}>{s.v}</div>
+            <div className="stat-label">{s.l}</div>
+            <div style={{fontSize:10,color:'var(--text-muted)',marginTop:2}}>{s.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Search + Filters ── */}
+      <div style={{display:'flex',gap:10,marginBottom:18,flexWrap:'wrap',alignItems:'center'}}>
+        <SearchBox value={search} onChange={setSearch} placeholder="Search projects…"/>
+        <select className="form-select" value={statusFilter} onChange={e=>setStatusFilter(e.target.value)} style={{width:'auto'}}>
+          <option value="">All Statuses</option>
+          {['active','on_hold','completed','cancelled'].map(s=><option key={s} value={s}>{s.replace('_',' ')}</option>)}
+        </select>
+        <DateRangeFilter from={dateRange.from} to={dateRange.to} onChange={setDateRange} label="Filter by dates"/>
+        {(statusFilter||dateRange.from) && <button className="btn btn-ghost btn-sm" onClick={()=>{setStatusFilter('');setDateRange({from:'',to:''})}}>✕ Clear</button>}
+      </div>
+      {filtered.length===0
+        ? <Empty icon="📁" title="No projects" desc={search||statusFilter||dateRange.from?'No projects match the filter':'Create your first project'}/>
+        : <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))',gap:16}}>
+          {filtered.map((p,idx)=>{
+            const color=CCLR[idx%CCLR.length]
+            const pct=p.budget>0?Math.min(100,Math.round(((p.spent||0)/p.budget)*100)):0
+            const over=p.budget>0&&(p.spent||0)>p.budget
+            const available=Math.max(0,(p.budget||0)-(p.reserved_budget||0)-(p.spent||0))
+            return (
+              <div key={p.id} style={{background:'var(--surface)',borderRadius:14,border:'1px solid var(--border)',overflow:'hidden',boxShadow:'var(--shadow-sm)',transition:'all .2s'}}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor=color;e.currentTarget.style.boxShadow=`0 0 0 3px ${color}12, var(--shadow)`}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor='var(--border)';e.currentTarget.style.boxShadow='var(--shadow-sm)'}}>
+
+                {/* Top color bar */}
+                <div style={{height:4,background:`linear-gradient(90deg,${color},${color}99)`}}/>
+
+                <div style={{padding:'18px 20px'}}>
+                  {/* Header row */}
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14}}>
+                    <div style={{display:'flex',alignItems:'center',gap:12}}>
+                      <div style={{width:42,height:42,borderRadius:12,background:`${color}12`,border:`1.5px solid ${color}25`,display:'flex',alignItems:'center',justifyContent:'center',color,flexShrink:0}}>
+                        <FolderOpen size={20}/>
+                      </div>
+                      <div>
+                        <div style={{fontFamily:'var(--font-head)',fontWeight:800,fontSize:15,lineHeight:1.2}}>{p.name}</div>
+                        {p.code&&<div style={{fontFamily:'var(--font-mono)',fontSize:10,color:'var(--text-muted)',marginTop:2}}>{p.code}</div>}
+                      </div>
+                    </div>
+                    <div style={{display:'flex',gap:5,alignItems:'center',flexShrink:0}}>
+                      <Pill s={p.status} map={SC}/>
+                      {canEdit&&<>
+                        <button className="btn btn-ghost btn-sm btn-icon" onClick={e=>{e.stopPropagation();setEditP(p);setPForm({name:p.name,description:p.description||'',budget:p.budget||'',reserved_budget:p.reserved_budget||'',start_date:p.start_date||'',end_date:p.end_date||'',status:p.status});setShowPM(true)}}><Edit2 size={11}/></button>
+                        <button className="btn btn-ghost btn-sm btn-icon" style={{color:'var(--rose)'}} onClick={e=>{e.stopPropagation();setDelP(p.id)}}><Trash2 size={11}/></button>
+                      </>}
+                    </div>
+                  </div>
+
+                  {/* Description */}
+                  {p.description&&<div style={{fontSize:12,color:'var(--text-muted)',marginBottom:14,lineHeight:1.5,display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden'}}>{p.description}</div>}
+
+                  {/* Budget progress */}
+                  <div style={{marginBottom:14}}>
+                    <div style={{display:'flex',justifyContent:'space-between',fontSize:11,marginBottom:6}}>
+                      <span style={{fontWeight:600,color:'var(--text-soft)'}}>Budget utilization</span>
+                      <span style={{fontFamily:'var(--font-mono)',fontWeight:700,color:over?'var(--rose)':color}}>{pct}%{over?' ⚠':''}</span>
+                    </div>
+                    {/* Stacked bar: spent + reserved */}
+                    <div style={{height:8,borderRadius:99,background:'var(--bg-3)',overflow:'hidden',display:'flex'}}>
+                      {p.budget>0&&<>
+                        <div style={{width:`${pct}%`,background:over?'var(--rose)':pct>75?'var(--amber)':color,transition:'width .3s',borderRadius:'99px 0 0 99px'}}/>
+                        {(p.reserved_budget||0)>0&&<div style={{width:`${Math.min(100-pct,((p.reserved_budget||0)/p.budget)*100)}%`,background:`${color}40`}}/>}
+                      </>}
+                    </div>
+                    <div style={{display:'flex',gap:12,marginTop:6,fontSize:10,color:'var(--text-muted)',flexWrap:'wrap'}}>
+                      <span>Spent: <strong style={{color:'var(--text)',fontFamily:'var(--font-mono)'}}>{rupee(p.spent||0)}</strong></span>
+                      {(p.reserved_budget||0)>0&&<span>Reserved: <strong style={{color:'var(--text)',fontFamily:'var(--font-mono)'}}>{rupee(p.reserved_budget)}</strong></span>}
+                      <span>Budget: <strong style={{color:'var(--text)',fontFamily:'var(--font-mono)'}}>{rupee(p.budget)}</strong></span>
+                    </div>
+                  </div>
+
+                  {/* 3 mini KPI cards */}
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:14}}>
+                    {[
+                      {l:'Available',v:rupee(available),c:available>0?'var(--emerald)':'var(--rose)'},
+                      {l:'HW Cost',  v:rupee(0),        c:'var(--amber)'},
+                      {l:'SW Cost',  v:rupee(0),        c:'#7c3aed'},
+                    ].map(s=>(
+                      <div key={s.l} style={{padding:'8px 10px',borderRadius:8,background:'var(--surface-2)',border:'1px solid var(--border)',textAlign:'center'}}>
+                        <div style={{fontFamily:'var(--font-mono)',fontWeight:700,fontSize:12,color:s.c}}>{s.v}</div>
+                        <div style={{fontSize:9,color:'var(--text-muted)',fontWeight:600,textTransform:'uppercase',marginTop:2}}>{s.l}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Dates */}
+                  {(p.start_date||p.end_date)&&(
+                    <div style={{fontSize:11,color:'var(--text-muted)',marginBottom:12,display:'flex',gap:12}}>
+                      {p.start_date&&<span>📅 {p.start_date}</span>}
+                      {p.end_date&&<span>🏁 {p.end_date}</span>}
+                    </div>
+                  )}
+
+                  <button className="btn btn-ghost btn-sm" style={{width:'100%',justifyContent:'center',borderColor:`${color}30`,color,fontWeight:700}}
+                    onClick={()=>openDetail(p)}>
+                    <Eye size={13}/> View Full Cost Breakdown
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      }
+      <Modal open={showPM} onClose={()=>setShowPM(false)} title={editP?'Edit Project':'New Project'}
+        footer={<><button className="btn btn-ghost" onClick={()=>setShowPM(false)}>Cancel</button><button className="btn btn-primary" onClick={saveProject} disabled={subP}>{subP?'Saving…':editP?'Update':'Create Project'}</button></>}>
+        <ProjForm form={pForm} setForm={setPForm}/>
+      </Modal>
+      <Confirm open={!!delP} message="Delete this project?" danger onConfirm={async()=>{await supabase.from('projects').delete().eq('id',delP);setDelP(null);loadList()}} onCancel={()=>setDelP(null)}/>
+    </div>
+  )
+}
+
+function ProjForm({form,setForm}) {
+  const available = Math.max(0,(parseFloat(form.budget)||0)-(parseFloat(form.reserved_budget)||0))
+  return (<>
+    <div className="form-group"><label className="form-label">Project Name *</label>
+      <input className="form-input" value={form.name||''} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. ThingsAlive NeoX Phase 2" required/>
+    </div>
+    <div className="form-row">
+      <div className="form-group"><label className="form-label">Status</label>
+        <select className="form-select" value={form.status||'active'} onChange={e=>setForm(f=>({...f,status:e.target.value}))}>
+          {['active','on_hold','completed','cancelled'].map(s=><option key={s} value={s}>{s.replace('_',' ')}</option>)}
+        </select></div>
+      <div className="form-group"><label className="form-label">Total Budget (₹)</label>
+        <input className="form-input" type="number" value={form.budget||''} onChange={e=>setForm(f=>({...f,budget:e.target.value}))} placeholder="e.g. 5000000"/>
+      </div>
+    </div>
+    <div className="form-row">
+      <div className="form-group">
+        <label className="form-label">Reserved Budget (₹)</label>
+        <input className="form-input" type="number" value={form.reserved_budget||''} onChange={e=>setForm(f=>({...f,reserved_budget:e.target.value}))} placeholder="Amount set aside / not yet spent"/>
+        <div style={{fontSize:11,color:'var(--text-muted)',marginTop:4}}>💡 Reserved = committed but not yet spent (contingency, upcoming purchases)</div>
+      </div>
+      <div className="form-group">
+        <label className="form-label">Available Budget</label>
+        <div style={{padding:'9px 12px',borderRadius:'var(--radius-sm)',background:'var(--bg-3)',border:'1px solid var(--border)',fontFamily:'var(--font-mono)',fontWeight:700,fontSize:14,color:available>0?'var(--emerald)':'var(--rose)'}}>{rupee(available)}</div>
+        <div style={{fontSize:11,color:'var(--text-muted)',marginTop:4}}>Total − Reserved</div>
+      </div>
+    </div>
+    <div className="form-row">
+      <div className="form-group"><label className="form-label">Start Date</label><input className="form-input" type="date" value={form.start_date||''} onChange={e=>setForm(f=>({...f,start_date:e.target.value}))}/></div>
+      <div className="form-group"><label className="form-label">End Date</label><input className="form-input" type="date" value={form.end_date||''} min={form.start_date} onChange={e=>setForm(f=>({...f,end_date:e.target.value}))}/></div>
+    </div>
+    <div className="form-group"><label className="form-label">Description</label><textarea className="form-textarea" value={form.description||''} onChange={e=>setForm(f=>({...f,description:e.target.value}))} placeholder="Project goals and scope…"/></div>
+  </>)
 }
