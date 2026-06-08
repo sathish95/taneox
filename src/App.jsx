@@ -27,6 +27,7 @@ import TimesheetPage from './pages/TimesheetPage'
 import LandingPage from './pages/LandingPage'
 import AuthPage from './pages/AuthPage'
 import AdminContentPage from './pages/AdminContentPage'
+import TasksPage from './pages/TasksPage'
 import ResourcePage from './pages/ResourcePage'
 
 function AppRoutes() {
@@ -70,6 +71,7 @@ function AppRoutes() {
           <Route path="/leave" element={<LeavePage />} />
           <Route path="/resources" element={<ResourcePage />} />
           <Route path="/timesheet" element={<TimesheetPage />} />
+          <Route path="/tasks" element={<TasksPage />} />
           <Route path="/content" element={isAdmin ? <AdminContentPage /> : <Navigate to="/" />} />
           <Route path="/login" element={<Navigate to="/" />} />
           <Route path="*" element={<Navigate to="/" />} />
